@@ -67,7 +67,7 @@ export function injectGatewayAuth(frameText: string, options: { token?: string; 
   return JSON.stringify(frame);
 }
 
-async function bridgeGatewayWebSocket(
+export async function bridgeGatewayWebSocket(
   request: http.IncomingMessage,
   socket: Duplex,
   head: Buffer,

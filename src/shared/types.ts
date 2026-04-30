@@ -1,5 +1,38 @@
 export type ConnectionState = "starting" | "connected" | "reconnecting" | "disconnected" | "error";
 
+export type RuntimeKind = "openclaw" | "hermes" | "claude-agent-sdk" | "cli-process";
+export type RuntimeTransport = "gateway-ws" | "stdio-jsonrpc" | "library-sdk" | "cli-process";
+export type RuntimeOwnership = "external" | "managed" | "none";
+export type RuntimeProcessState = "not-started" | "starting" | "running" | "external" | "failed";
+
+export interface RuntimeCapabilities {
+  sessions: boolean;
+  sessionList: boolean;
+  resume: boolean;
+  fork: boolean;
+  stream: boolean;
+  abort: boolean;
+  approvals: boolean;
+  toolEvents: boolean;
+  mcp: boolean;
+  hooks: boolean;
+}
+
+export interface RuntimeBootstrap {
+  kind: RuntimeKind;
+  transport: RuntimeTransport;
+  name: string;
+  available: boolean;
+  version?: string;
+  bridgePath: string;
+  capabilities: RuntimeCapabilities;
+  reachable: boolean;
+  ready: boolean;
+  ownership: RuntimeOwnership;
+  processState: RuntimeProcessState;
+  error?: string;
+}
+
 export interface BootstrapDiagnostics {
   code: string;
   message: string;
@@ -24,12 +57,13 @@ export interface BootstrapResponse {
     port: number;
     bridgePath?: string;
     bridgeAuthReady?: boolean;
-    ownership: "external" | "managed" | "none";
+    ownership: RuntimeOwnership;
     reachable: boolean;
     ready: boolean;
-    processState: "not-started" | "starting" | "running" | "external" | "failed";
+    processState: RuntimeProcessState;
     error?: string;
   };
+  runtime: RuntimeBootstrap;
   diagnostics: BootstrapDiagnostics[];
 }
 

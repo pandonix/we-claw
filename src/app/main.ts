@@ -63,8 +63,8 @@ async function bootstrap(): Promise<void> {
     state = { ...state, bootstrap: bootstrapResponse, statusText: statusFromBootstrap(bootstrapResponse) };
     render();
 
-    if (bootstrapResponse.gateway.reachable) {
-      await connectGateway(browserGatewayUrl(bootstrapResponse));
+    if (bootstrapResponse.runtime.reachable) {
+      await connectGateway(browserRuntimeUrl(bootstrapResponse));
     } else {
       state = { ...state, connection: "disconnected" };
       render();
@@ -80,7 +80,7 @@ async function bootstrap(): Promise<void> {
 }
 
 async function connectGateway(url: string): Promise<void> {
-  state = { ...state, connection: "reconnecting", statusText: "正在连接 OpenClaw Gateway" };
+  state = { ...state, connection: "reconnecting", statusText: `正在连接 ${runtimeName()}` };
   render();
 
   try {
@@ -120,13 +120,13 @@ async function connectGateway(url: string): Promise<void> {
         return;
       }
       if (frame.type === "shutdown" || frame.event === "shutdown") {
-        state = { ...state, connection: "disconnected", statusText: "Gateway 已断开" };
+        state = { ...state, connection: "disconnected", statusText: `${runtimeName()} 已断开` };
         render();
         return;
       }
     });
     await gateway.connect();
-    state = { ...state, connection: "connected", statusText: "Gateway connected" };
+    state = { ...state, connection: "connected", statusText: `${runtimeName()} connected` };
     render();
     await gateway.request("health").catch(() => undefined);
     await gateway.request("sessions.subscribe").catch(() => undefined);
@@ -226,7 +226,7 @@ async function sendPrompt(text: string): Promise<void> {
     state = {
       ...state,
       composerText: trimmed,
-      chat: { ...state.chat, running: false, error: "无法创建 OpenClaw 工作会话。" },
+      chat: { ...state.chat, running: false, error: `无法创建 ${runtimeName()} 工作会话。` },
       statusText: "发送失败，输入已保留"
     };
     render();
@@ -379,8 +379,8 @@ function render(): void {
       <main class="workspace">
         <header class="topbar">
           <div class="title-block">
-            <strong>${escapeHtml(activeWork?.title ?? "OpenClaw 工作台")}</strong>
-            <span>${escapeHtml(activeWork?.subtitle ?? "loopback Gateway · local workspace")}</span>
+            <strong>${escapeHtml(activeWork?.title ?? `${runtimeName()} 工作台`)}</strong>
+            <span>${escapeHtml(activeWork?.subtitle ?? `${runtimeTransportLabel()} · local workspace`)}</span>
           </div>
           <div class="top-actions">
             <span class="runtime-pill ${state.connection}"><i></i>${escapeHtml(labelForConnection(state.connection))}</span>
@@ -391,7 +391,7 @@ function render(): void {
           ${renderDiagnostics()}
           ${state.chat.messages.map(renderMessage).join("")}
           ${renderRuntimeBlocks()}
-          ${state.chat.running ? `<article class="run-row"><span></span><p>OpenClaw 正在处理当前请求</p></article>` : ""}
+          ${state.chat.running ? `<article class="run-row"><span></span><p>${escapeHtml(runtimeName())} 正在处理当前请求</p></article>` : ""}
           ${state.chat.error ? `<article class="inline-error"><strong>运行失败</strong><p>${escapeHtml(state.chat.error)}</p></article>` : ""}
         </section>
         <form class="composer" data-testid="composer">
@@ -403,8 +403,8 @@ function render(): void {
           </div>
         </form>
         <footer class="statusbar">
-          <span>${escapeHtml(state.bootstrap?.gateway.ownership ?? "none")} gateway</span>
-          <span>${escapeHtml(state.bootstrap?.openclaw.version ?? "OpenClaw 未确认")}</span>
+          <span>${escapeHtml(state.bootstrap?.runtime.ownership ?? "none")} runtime</span>
+          <span>${escapeHtml(state.bootstrap?.runtime.version ?? `${runtimeName()} 未确认`)}</span>
         </footer>
       </main>
     </div>
@@ -445,12 +445,12 @@ function bindEvents(): void {
 }
 
 async function createWork(): Promise<void> {
-  await createWorkFromGateway({ statusText: "正在创建 OpenClaw 工作" });
+  await createWorkFromGateway({ statusText: `正在创建 ${runtimeName()} 工作` });
 }
 
 async function createWorkFromGateway(options: { initialTitle?: string; statusText?: string } = {}): Promise<string | undefined> {
   if (!gateway || !canCreateWork()) return undefined;
-  state = { ...state, isCreatingSession: true, statusText: options.statusText ?? "正在创建 OpenClaw 工作" };
+  state = { ...state, isCreatingSession: true, statusText: options.statusText ?? `正在创建 ${runtimeName()} 工作` };
   render();
 
   const result = await gateway.request("sessions.create", {}).catch((error) => {
@@ -561,7 +561,7 @@ function renderWorkItems(): string {
           <span class="state-dot ${work.status ?? "unknown"}"></span>
           <span class="session-main">
             <strong>${escapeHtml(work.title)}</strong>
-            <em>${escapeHtml(work.subtitle ?? "OpenClaw · local workspace")}</em>
+            <em>${escapeHtml(work.subtitle ?? `${runtimeName()} · local workspace`)}</em>
           </span>
           <time>${escapeHtml(formatRelativeTimestamp(work.lastOpenedAt ?? work.updatedAt))}</time>
         </button>
@@ -575,7 +575,7 @@ function renderGatewaySessionsPanel(): string {
     return `
       <details class="gateway-sessions-panel">
         <summary>运行时会话</summary>
-        <div class="empty-sessions">暂无 Gateway sessions</div>
+        <div class="empty-sessions">暂无 runtime sessions</div>
       </details>
     `;
   }
@@ -606,7 +606,7 @@ function renderDiagnostics(): string {
   if (!diagnostics.length && state.connection !== "disconnected" && state.connection !== "error") return "";
   const items = diagnostics.length
     ? diagnostics
-    : [{ code: "gateway.disconnected", message: "本地 OpenClaw Gateway 当前不可达。", detail: state.statusText }];
+    : [{ code: "runtime.disconnected", message: `本地 ${runtimeName()} 当前不可达。`, detail: state.statusText }];
   return items
     .map(
       (item) => `
@@ -677,10 +677,18 @@ function canRefreshSessions(): boolean {
   return state.connection === "connected" && !state.isRefreshingSessions;
 }
 
+function runtimeName(): string {
+  return state.bootstrap?.runtime.name ?? "Runtime";
+}
+
+function runtimeTransportLabel(): string {
+  return state.bootstrap?.runtime.transport ?? "runtime";
+}
+
 function statusFromBootstrap(bootstrapResponse: BootstrapResponse): string {
   if (!bootstrapResponse.node.compatible) return "Node.js 版本不满足 OpenClaw 要求";
-  if (!bootstrapResponse.openclaw.available) return "未找到 openclaw 可执行文件";
-  if (!bootstrapResponse.gateway.reachable) return "Gateway 未运行或正在启动";
+  if (!bootstrapResponse.runtime.available) return `${bootstrapResponse.runtime.name} 不可用`;
+  if (!bootstrapResponse.runtime.reachable) return `${bootstrapResponse.runtime.name} 未运行或正在启动`;
   return "Bootstrap ready";
 }
 
@@ -695,10 +703,10 @@ function classifyGatewayError(error: unknown): string {
   return message || "Gateway connection failed";
 }
 
-function browserGatewayUrl(bootstrapResponse: BootstrapResponse): string {
-  if (bootstrapResponse.gateway.bridgePath) {
+function browserRuntimeUrl(bootstrapResponse: BootstrapResponse): string {
+  if (bootstrapResponse.runtime.bridgePath) {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${window.location.host}${bootstrapResponse.gateway.bridgePath}`;
+    return `${protocol}//${window.location.host}${bootstrapResponse.runtime.bridgePath}`;
   }
   return bootstrapResponse.gateway.url;
 }
@@ -706,10 +714,10 @@ function browserGatewayUrl(bootstrapResponse: BootstrapResponse): string {
 function labelForConnection(connection: ConnectionState): string {
   return {
     starting: "Starting",
-    connected: "Gateway Connected",
+    connected: `${runtimeName()} Connected`,
     reconnecting: "Reconnecting",
     disconnected: "Disconnected",
-    error: "Gateway Error"
+    error: `${runtimeName()} Error`
   }[connection];
 }
 
@@ -721,15 +729,15 @@ function statusFromChatSendResult(result: unknown): string {
   const record = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
   const runId = typeof record.runId === "string" ? record.runId : undefined;
   const status = typeof record.status === "string" ? record.status : undefined;
-  if (runId && (status === "started" || status === "accepted" || status === "in_flight")) return `OpenClaw run ${runId.slice(0, 8)} 已启动`;
-  return "OpenClaw 已返回消息";
+  if (runId && (status === "started" || status === "accepted" || status === "in_flight")) return `${runtimeName()} run ${runId.slice(0, 8)} 已启动`;
+  return `${runtimeName()} 已返回消息`;
 }
 
 function statusFromChatEvent(event: unknown, fallback: string): string {
   const record = event && typeof event === "object" ? (event as Record<string, unknown>) : {};
-  if (record.state === "final") return "OpenClaw 已返回消息";
-  if (record.state === "error") return "OpenClaw 返回错误";
-  if (record.state === "aborted") return "OpenClaw 运行已停止";
+  if (record.state === "final") return `${runtimeName()} 已返回消息`;
+  if (record.state === "error") return `${runtimeName()} 返回错误`;
+  if (record.state === "aborted") return `${runtimeName()} 运行已停止`;
   return fallback;
 }
 
@@ -744,8 +752,8 @@ function statusFromAgentEvent(event: unknown, fallback: string): string {
     if (phase === "start") return `${name} 正在运行`;
     return `${name} 已更新`;
   }
-  if (stream === "lifecycle" && data.phase === "end") return "OpenClaw run 已完成";
-  if (stream === "lifecycle" && data.phase === "error") return "OpenClaw run 失败";
+  if (stream === "lifecycle" && data.phase === "end") return `${runtimeName()} run 已完成`;
+  if (stream === "lifecycle" && data.phase === "error") return `${runtimeName()} run 失败`;
   return fallback;
 }
 

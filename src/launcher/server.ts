@@ -5,6 +5,7 @@ import { extname, join, normalize, resolve } from "node:path";
 import { createBootstrapSnapshot, createLauncherContext, detectOpenClaw, probeGateway, type LauncherContext } from "./bootstrap.js";
 import { installGatewayBridge } from "./gateway-bridge.js";
 import { redact } from "./redact.js";
+import { installRuntimeBridge, runtimeKind } from "./runtime-bridge.js";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -24,7 +25,7 @@ export async function startWeClawServer(options: { root?: string; openBrowser?: 
   const context = createLauncherContext();
   const root = resolve(options.root ?? "dist/client");
 
-  if (context.config.manageGateway) {
+  if (runtimeKind(context) === "openclaw" && context.config.manageGateway) {
     await ensureGateway(context);
   }
 
@@ -39,6 +40,7 @@ export async function startWeClawServer(options: { root?: string; openBrowser?: 
     serveStatic(root, request.url ?? "/", response);
   });
   installGatewayBridge(server, context);
+  installRuntimeBridge(server, context);
 
   await new Promise<void>((resolveListen) => server.listen(context.config.httpPort, context.config.host, resolveListen));
 

@@ -6,6 +6,7 @@ import { createLauncherConfig, isNodeCompatible, type LauncherConfig } from "./c
 import { resolveGatewayAuth } from "./gateway-auth.js";
 import { gatewayBridgePath } from "./gateway-bridge.js";
 import { redact } from "./redact.js";
+import { runtimeBootstrap } from "./runtime-bridge.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -78,6 +79,35 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
       processState: context.managedGatewayStarted ? "running" : gateway.reachable ? "external" : "not-started",
       error: context.gatewayError ?? gateway.error
     },
+    runtime: runtimeBootstrap(
+      context,
+      {
+        kind: "openclaw",
+        transport: "gateway-ws",
+        name: "OpenClaw",
+        available: openclaw.available,
+        version: openclaw.version,
+        bridgePath: gatewayBridgePath(),
+        capabilities: {
+          sessions: true,
+          sessionList: true,
+          resume: true,
+          fork: false,
+          stream: true,
+          abort: true,
+          approvals: true,
+          toolEvents: true,
+          mcp: true,
+          hooks: true
+        },
+        ownership: context.managedGatewayStarted ? "managed" : gateway.reachable ? "external" : "none",
+        reachable: gateway.reachable,
+        ready: gateway.ready,
+        processState: context.managedGatewayStarted ? "running" : gateway.reachable ? "external" : "not-started",
+        error: context.gatewayError ?? gateway.error
+      },
+      openclaw.version
+    ),
     diagnostics
   };
 }
