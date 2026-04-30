@@ -552,6 +552,36 @@ button {
   font-style: normal;
 }
 
+.artifact-preview {
+  padding: 10px 12px 12px;
+  border-top: 1px solid #e8e8e8;
+  background: #fafafa;
+}
+
+.artifact-preview p {
+  margin: 0 0 9px;
+  color: #61666a;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.artifact-preview div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.artifact-preview button {
+  width: auto;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid #dedede;
+  border-radius: 8px;
+  background: #fff;
+  color: #3d4145;
+  font-size: 12px;
+}
+
 .approval-card {
   display: flex;
   gap: 12px;
@@ -716,6 +746,12 @@ button {
   height: 26px;
   border-radius: 8px;
   color: #5b6065;
+}
+
+.mode-button {
+  padding: 0 9px;
+  color: #7a4b18 !important;
+  background: #fff7eb !important;
 }
 
 .composer-bar button:hover {

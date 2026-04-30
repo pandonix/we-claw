@@ -331,6 +331,54 @@ Desktop interaction:
 - Copy actions are scoped to visible text, path, or JSON payload; avoid copying hidden sensitive fields by default.
 - A future optional detail panel may show expanded artifact/media inspection, but the default first-screen layout remains conversation-first.
 
+### Workspace Artifacts
+
+Default choice: v1 renders artifacts as compact summary cards with optional inline expansion.
+
+Artifact types:
+- `artifact.file`: a generated, modified, or referenced local file.
+- `artifact.diff`: a compact file-change summary.
+- `artifact.bundle`: a grouped multi-file result.
+- `media.image`: screenshot, image attachment, or generated image.
+- `tool.output.text`: command output, logs, test output, or other text stream.
+
+V1 behavior:
+- Show a compact summary card by default.
+- Allow lightweight inline expansion for preview/details.
+- Prefer `Open`, `Copy path`, and `Show raw payload` actions over embedding a full editor.
+- Show at most a small bounded file list for multi-file results, then collapse the rest behind `+N more`.
+- Large logs, large diffs, large JSON, and large media are preview-first and must not auto-expand.
+- Full file trees, built-in code editing, persistent artifact inspector panels, and default giant diffs are out of scope for v1.
+
+Artifact card minimum fields:
+- Type label.
+- Display name or basename.
+- Status such as created, updated, modified, failed, or generated.
+- Source, when known: assistant, tool, Gateway event, or user attachment.
+- Optional path/details in secondary text.
+
+### Permission And Run Modes
+
+Default choice: v1 uses an `Ask First` permission mode by default.
+
+Do not use "Full Access" language in the UI. It implies We-Claw can bypass OpenClaw's security model, which is not true. We-Claw permission mode is an interaction policy; OpenClaw Gateway scopes and runtime policies remain the enforcement layer.
+
+Mode model:
+- `Read Only`: read status, sessions, history, logs, and metadata; no chat send or mutating actions.
+- `Ask First`: default mode. Allow normal chat interaction, but show inline approval cards for risky or mutating actions.
+- `Trusted Local`: reserved for a later version. May request broader local privileges, but still respects Gateway scopes, approvals, and policy.
+
+Gateway scope mapping:
+- `Read Only`: `operator.read`.
+- `Ask First`: `operator.read`, `operator.write`, and `operator.approvals`.
+- `Trusted Local`: may additionally request `operator.admin` only when a concrete supported feature requires it.
+
+V1 implementation guidance:
+- Composer should display `Ask First` / `需确认`, not `Full Access` / `完全访问权限`.
+- V1 should implement `Read Only` and `Ask First` first.
+- `Trusted Local` may appear in design notes but should not be enabled until the concrete Gateway operations that need it are implemented and verified.
+- Approval requests render as `approval-card` inline in the conversation stream.
+
 ### Managed Gateway Startup
 
 Default choice: We-Claw starts and owns the Gateway process for v1.
@@ -361,15 +409,33 @@ Loopback-only note:
 
 ### Browser-To-Gateway vs Node Proxy
 
-Default choice: browser connects directly to the managed Gateway when safe.
+Default choice: browser connects to We-Claw Node; We-Claw Node proxies Gateway WebSocket RPC/events.
 
-Use Node proxy only for:
-- token hiding,
-- auth bootstrapping,
-- insecure origin problems,
-- Gateway discovery,
-- process lifecycle,
-- dev convenience.
+Authentication boundary:
+- Node launcher/server holds the OpenClaw Gateway token.
+- Browser must not receive, store, log, or persist the long-lived Gateway token.
+- Browser receives only a We-Claw local session credential or short-lived bootstrap nonce.
+- Browser talks to We-Claw Node through `/api/*` and a We-Claw-owned WebSocket endpoint such as `/ws/gateway`.
+- Node connects to the loopback OpenClaw Gateway at `ws://127.0.0.1:18789` and performs Gateway auth/connect on behalf of the browser.
+
+Proxy behavior:
+- Browser sends Gateway-shaped request frames to We-Claw Node.
+- Node validates the method against the active permission mode and v1 method allowlist.
+- Node forwards allowed requests to Gateway and maps responses back by request id.
+- Node forwards allowed Gateway events to the browser.
+- Node redacts or avoids forwarding sensitive auth material.
+- Node owns reconnect handling to Gateway and reports runtime status to the browser.
+
+Rationale:
+- Keeps Gateway token out of browser memory/storage and URLs.
+- Gives We-Claw a clear place to enforce `Read Only` and `Ask First` interaction policies.
+- Keeps the product shape aligned with the single Node server scaffold decision.
+
+Do not:
+- Put Gateway token in `/api/bootstrap`.
+- Put Gateway token in route URLs, query strings, localStorage, or logs.
+- Let the browser call arbitrary Gateway methods.
+- Treat We-Claw permission mode as a replacement for Gateway scopes; it is an additional UI/proxy policy layer.
 
 ### Reuse OpenClaw UI Code vs Rebuild
 
@@ -398,6 +464,26 @@ Initial app shape:
 - TypeScript for app, Gateway adapter, state reducers, and launcher API types.
 - No framework dependency beyond what is needed for the first slice unless implementation evidence shows plain TypeScript is becoming brittle.
 - Keep the visual prototype available as a reference until the Vite app matches it.
+
+Scaffold decision:
+- Use one package, not a workspace/monorepo.
+- Use a single Node server as the local installation entrypoint.
+- The Node server serves the built Vite frontend and all We-Claw `/api/*` routes.
+- The managed OpenClaw Gateway remains a separate loopback process, usually on `127.0.0.1:18789`.
+- Avoid a production architecture where the frontend dev server and Node API server are separate user-facing processes.
+
+Target runtime shape:
+
+```text
+http://127.0.0.1:<we-claw-port>
+  -> built Vite UI
+  -> /api/bootstrap, /api/gateway/status, ...
+
+ws://127.0.0.1:18789
+  -> We-Claw-managed OpenClaw Gateway
+```
+
+Development can still use Vite middleware or a dev-only proxy internally, but the product shape is one We-Claw Node server serving both UI and local API.
 
 ### Gateway As Source Of Truth
 
