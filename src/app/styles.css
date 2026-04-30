@@ -11,6 +11,7 @@
 html,
 body,
 #app {
+  height: 100%;
   min-height: 100%;
 }
 
@@ -40,14 +41,17 @@ textarea:disabled {
 .app-shell {
   display: grid;
   grid-template-columns: 292px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
 }
 
 .session-rail {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: 100vh;
+  min-height: 0;
+  height: 100vh;
+  overflow: hidden;
   padding: 14px 8px;
   background: #dededc;
 }
@@ -143,6 +147,15 @@ textarea:disabled {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.brand-row,
+.new-session,
+.rail-heading,
+.settings-row {
+  flex: none;
 }
 
 .session-row {
