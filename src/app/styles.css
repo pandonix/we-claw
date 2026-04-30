@@ -164,6 +164,7 @@ textarea:disabled {
 .brand-row,
 .new-session,
 .rail-heading,
+.gateway-sessions-panel,
 .settings-row {
   flex: none;
 }
@@ -227,6 +228,59 @@ textarea:disabled {
   padding: 12px 8px;
   color: #71717a;
   font-size: 13px;
+}
+
+.gateway-sessions-panel {
+  margin-top: 8px;
+  border-top: 1px solid rgba(113, 113, 122, 0.2);
+  padding-top: 8px;
+}
+
+.gateway-sessions-panel summary {
+  min-height: 30px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: #71717a;
+  cursor: pointer;
+  font-size: 12px;
+  list-style-position: inside;
+}
+
+.gateway-sessions-panel summary:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.gateway-session-list {
+  display: grid;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.gateway-session-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) 24px;
+  align-items: start;
+  gap: 9px;
+  min-height: 46px;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.gateway-session-row:hover {
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.gateway-session-row button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: #52525b;
+}
+
+.gateway-session-row button:hover {
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .workspace {

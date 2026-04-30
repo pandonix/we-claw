@@ -1,14 +1,26 @@
 import { GatewayClient } from "../gateway/client";
 import { normalizeHistory, normalizeSessions, reduceAgentEvent, reduceChatEvent, reduceToolEvent, titleFromHistory, UNTITLED_SESSION } from "../shared/normalizers";
-import type { BootstrapResponse, ChatState, ConnectionState, ConversationNotice, SessionSummary, ToolBlock, TranscriptMessage } from "../shared/types";
+import type { BootstrapResponse, ChatState, ConnectionState, ConversationNotice, SessionSummary, ToolBlock, TranscriptMessage, WorkIndex, WorkItem } from "../shared/types";
+import {
+  applyWorkTitleFromHistory,
+  createWorkIndexEntry,
+  markWorkItemOpened,
+  normalizeWorkIndex,
+  projectWorkItems,
+  promoteSessionToWorkItem
+} from "../shared/work-items";
 import "./styles.css";
 
 const SESSION_TITLE_CACHE_KEY = "we-claw.sessionTitleCache.v1";
+const WORK_INDEX_CACHE_KEY = "we-claw.workIndex.v1";
 
 interface AppState {
   bootstrap?: BootstrapResponse;
   connection: ConnectionState;
   sessions: SessionSummary[];
+  workIndex: WorkIndex;
+  workItems: WorkItem[];
+  activeWorkId?: string;
   activeSessionId?: string;
   chat: ChatState;
   composerText: string;
@@ -28,6 +40,8 @@ let subscribedSessionKey: string | undefined;
 let state: AppState = {
   connection: "starting",
   sessions: [],
+  workIndex: readWorkIndex(),
+  workItems: [],
   chat: {
     messages: [],
     running: false
@@ -131,7 +145,7 @@ async function loadSessions(options: { loadHistoryForActive?: boolean; showRefre
   if (!gateway) return;
   if (options.showRefreshing) {
     if (state.isRefreshingSessions) return;
-    state = { ...state, isRefreshingSessions: true, statusText: "正在刷新会话列表" };
+    state = { ...state, isRefreshingSessions: true, statusText: "正在刷新工作列表" };
     render();
   }
 
@@ -148,12 +162,16 @@ async function loadSessions(options: { loadHistoryForActive?: boolean; showRefre
     if (result === undefined) return;
 
     const sessions = applyCachedTitles(normalizeSessions(result));
-    const hasActiveSession = Boolean(state.activeSessionId && sessions.some((session) => session.id === state.activeSessionId));
-    const activeSessionId = hasActiveSession ? state.activeSessionId : sessions[0]?.id;
-    const statusText = options.showRefreshing && (!activeSessionId || !options.loadHistoryForActive) ? "会话列表已刷新" : state.statusText;
-    state = { ...state, sessions, activeSessionId, statusText };
+    const projection = projectActiveWork({
+      sessions,
+      workIndex: state.workIndex,
+      activeWorkId: state.activeWorkId,
+      activeSessionId: state.activeSessionId
+    });
+    const statusText = options.showRefreshing && (!projection.activeSessionId || !options.loadHistoryForActive) ? "工作列表已刷新" : state.statusText;
+    state = { ...state, sessions, workItems: projection.workItems, activeWorkId: projection.activeWorkId, activeSessionId: projection.activeSessionId, statusText };
     render();
-    if (activeSessionId && options.loadHistoryForActive) await loadHistory(activeSessionId);
+    if (projection.activeSessionId && options.loadHistoryForActive) await loadHistory(projection.activeSessionId);
   } finally {
     if (options.showRefreshing) {
       state = { ...state, isRefreshingSessions: false };
@@ -179,9 +197,15 @@ async function loadHistory(sessionId: string, options: { preserveRuntimeBlocks?:
   });
   if (requestSeq !== historyRequestSeq || state.activeSessionId !== sessionId) return;
   const messages = normalizeHistory(history);
+  const sessions = applyHistoryTitle(sessionId, messages);
+  const workIndex = applyWorkTitleFromHistory(state.workIndex, sessionId, messages);
+  if (workIndex !== state.workIndex) saveWorkIndex(workIndex);
+  const workItems = projectWorkItems({ workIndex, sessions, activeSessionKey: state.activeSessionId });
   state = {
     ...state,
-    sessions: applyHistoryTitle(sessionId, messages),
+    sessions,
+    workIndex,
+    workItems,
     chat: {
       messages,
       toolBlocks: options.preserveRuntimeBlocks ? state.chat.toolBlocks : undefined,
@@ -197,32 +221,39 @@ async function sendPrompt(text: string): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed || !gateway || state.connection !== "connected") return;
 
+  const ensuredSessionKey = state.activeSessionId ?? (await createWorkFromGateway({ initialTitle: titleFromPromptText(trimmed), statusText: "正在创建新工作" }));
+  if (!ensuredSessionKey) {
+    state = {
+      ...state,
+      composerText: trimmed,
+      chat: { ...state.chat, running: false, error: "无法创建 OpenClaw 工作会话。" },
+      statusText: "发送失败，输入已保留"
+    };
+    render();
+    return;
+  }
+
   const userMessage: TranscriptMessage = {
     id: `local-${Date.now()}`,
     role: "user",
     text: trimmed,
     status: "final"
   };
-  const sessionKey = state.activeSessionId;
+  const sessionKey = ensuredSessionKey;
+  const sessions = applyHistoryTitle(sessionKey, [userMessage]);
+  const workIndex = applyWorkTitleFromHistory(state.workIndex, sessionKey, [userMessage]);
+  if (workIndex !== state.workIndex) saveWorkIndex(workIndex);
+  const workItems = projectWorkItems({ workIndex, sessions, activeSessionKey: sessionKey });
   state = {
     ...state,
     composerText: "",
-    sessions: sessionKey ? applyHistoryTitle(sessionKey, [userMessage]) : state.sessions,
+    sessions,
+    workIndex,
+    workItems,
     chat: { ...state.chat, running: true, messages: [...state.chat.messages, userMessage] },
     statusText: "chat.send 已发送"
   };
   render();
-
-  if (!sessionKey) {
-    state = {
-      ...state,
-      composerText: trimmed,
-      chat: { ...state.chat, running: false, error: "No OpenClaw session is selected." },
-      statusText: "发送失败，输入已保留"
-    };
-    render();
-    return;
-  }
 
   const params = { sessionKey, message: trimmed, idempotencyKey: createIdempotencyKey() };
   const result = await gateway.request("chat.send", params).catch((error) => {
@@ -277,6 +308,47 @@ function saveCachedTitle(sessionId: string, title: string): void {
   }
 }
 
+function readWorkIndex(): WorkIndex {
+  try {
+    const raw = window.localStorage.getItem(WORK_INDEX_CACHE_KEY);
+    return normalizeWorkIndex(raw ? JSON.parse(raw) : undefined);
+  } catch {
+    return normalizeWorkIndex(undefined);
+  }
+}
+
+function saveWorkIndex(workIndex: WorkIndex): void {
+  try {
+    window.localStorage.setItem(WORK_INDEX_CACHE_KEY, JSON.stringify(workIndex));
+  } catch {
+    // The Gateway session still exists; persistence only affects the UI rail projection.
+  }
+}
+
+function projectActiveWork(params: {
+  sessions: SessionSummary[];
+  workIndex: WorkIndex;
+  activeWorkId?: string;
+  activeSessionId?: string;
+}): { workItems: WorkItem[]; activeWorkId?: string; activeSessionId?: string } {
+  const workItems = projectWorkItems({
+    workIndex: params.workIndex,
+    sessions: params.sessions,
+    activeSessionKey: params.activeSessionId
+  });
+  const current = workItems.find((work) => work.id === params.activeWorkId || work.targetSessionKey === params.activeSessionId);
+  const activeWork = current ?? workItems[0];
+  return {
+    workItems,
+    activeWorkId: activeWork?.id,
+    activeSessionId: activeWork?.targetSessionKey
+  };
+}
+
+function titleFromPromptText(text: string): string | undefined {
+  return titleFromHistory([{ id: "prompt-title", role: "user", text, status: "final" }]);
+}
+
 async function abortRun(): Promise<void> {
   if (!gateway || !state.activeSessionId) return;
   await gateway.request("chat.abort", { sessionKey: state.activeSessionId }).catch(() => undefined);
@@ -285,36 +357,37 @@ async function abortRun(): Promise<void> {
 }
 
 function render(): void {
-  const activeSession = state.sessions.find((session) => session.id === state.activeSessionId);
+  const activeWork = state.workItems.find((work) => work.id === state.activeWorkId);
   appRoot.innerHTML = `
     <div class="app-shell">
-      <aside class="session-rail" aria-label="OpenClaw sessions">
+      <aside class="session-rail" aria-label="工作列表">
         <div class="brand-row">
           <strong>We-Claw</strong>
           <span class="gateway-dot ${state.connection}"></span>
         </div>
-        <button class="new-session" data-action="new-session" type="button" ${canCreateSession() ? "" : "disabled"} aria-busy="${state.isCreatingSession ? "true" : "false"}">${state.isCreatingSession ? "创建中..." : "+ 新会话"}</button>
+        <button class="new-session" data-action="new-work" type="button" ${canCreateWork() ? "" : "disabled"} aria-busy="${state.isCreatingSession ? "true" : "false"}">${state.isCreatingSession ? "创建中..." : "+ 新工作"}</button>
         <div class="rail-heading">
-          <span>Gateway Sessions</span>
-          <button class="refresh-session ${state.isRefreshingSessions ? "refreshing" : ""}" type="button" aria-label="${state.isRefreshingSessions ? "正在刷新会话" : "刷新会话"}" title="${state.isRefreshingSessions ? "正在刷新会话" : "刷新会话"}" data-action="refresh" ${canRefreshSessions() ? "" : "disabled"} aria-busy="${state.isRefreshingSessions ? "true" : "false"}">↻</button>
+          <span>工作</span>
+          <button class="refresh-session ${state.isRefreshingSessions ? "refreshing" : ""}" type="button" aria-label="${state.isRefreshingSessions ? "正在刷新工作" : "刷新工作"}" title="${state.isRefreshingSessions ? "正在刷新工作" : "刷新工作"}" data-action="refresh" ${canRefreshSessions() ? "" : "disabled"} aria-busy="${state.isRefreshingSessions ? "true" : "false"}">↻</button>
         </div>
-        <div class="session-list" data-testid="session-list">
-          ${renderSessions()}
+        <div class="session-list" data-testid="work-list">
+          ${renderWorkItems()}
         </div>
+        ${renderGatewaySessionsPanel()}
         <button class="settings-row" type="button">本地设置</button>
       </aside>
       <main class="workspace">
         <header class="topbar">
           <div class="title-block">
-            <strong>${escapeHtml(activeSession?.title ?? "OpenClaw 会话工作台")}</strong>
-            <span>${escapeHtml(activeSession?.subtitle ?? "loopback Gateway · local workspace")}</span>
+            <strong>${escapeHtml(activeWork?.title ?? "OpenClaw 工作台")}</strong>
+            <span>${escapeHtml(activeWork?.subtitle ?? "loopback Gateway · local workspace")}</span>
           </div>
           <div class="top-actions">
             <span class="runtime-pill ${state.connection}"><i></i>${escapeHtml(labelForConnection(state.connection))}</span>
             <button type="button" aria-label="重新连接" data-action="reconnect">↻</button>
           </div>
         </header>
-        <section class="conversation" data-testid="conversation" aria-label="会话内容">
+        <section class="conversation" data-testid="conversation" aria-label="工作内容">
           ${renderDiagnostics()}
           ${state.chat.messages.map(renderMessage).join("")}
           ${renderRuntimeBlocks()}
@@ -323,7 +396,7 @@ function render(): void {
         </section>
         <form class="composer" data-testid="composer">
           <label class="sr-only" for="prompt">输入消息</label>
-          <textarea id="prompt" rows="1" placeholder="输入 prompt，发送到当前 OpenClaw session" ${state.connection === "connected" ? "" : "disabled"}>${escapeHtml(state.composerText)}</textarea>
+          <textarea id="prompt" rows="1" placeholder="输入 prompt，发送到当前工作" ${state.connection === "connected" ? "" : "disabled"}>${escapeHtml(state.composerText)}</textarea>
           <div class="composer-bar">
             <span>${escapeHtml(state.statusText)}</span>
             <button class="send" type="${state.chat.running ? "button" : "submit"}" data-action="${state.chat.running ? "abort" : "send"}" aria-label="${state.chat.running ? "停止" : "发送"}" ${canSubmit() ? "" : "disabled"}>${state.chat.running ? "■" : "↑"}</button>
@@ -351,24 +424,33 @@ function bindEvents(): void {
   appRoot.querySelector<HTMLTextAreaElement>("#prompt")?.addEventListener("input", (event) => {
     state.composerText = (event.target as HTMLTextAreaElement).value;
   });
-  appRoot.querySelectorAll<HTMLButtonElement>("[data-session-id]").forEach((button) => {
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-work-id]").forEach((button) => {
     button.addEventListener("click", () => {
-      const sessionId = button.dataset.sessionId;
+      const workId = button.dataset.workId;
+      if (!workId) return;
+      void openWorkItem(workId);
+    });
+  });
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-promote-session-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const sessionId = button.dataset.promoteSessionId;
       if (!sessionId) return;
-      state = { ...state, activeSessionId: sessionId };
-      render();
-      void loadHistory(sessionId);
+      void promoteGatewaySession(sessionId);
     });
   });
   appRoot.querySelector<HTMLButtonElement>("[data-action='refresh']")?.addEventListener("click", () => void refreshSessions());
   appRoot.querySelector<HTMLButtonElement>("[data-action='reconnect']")?.addEventListener("click", () => void bootstrap());
   appRoot.querySelector<HTMLButtonElement>("[data-action='abort']")?.addEventListener("click", () => void abortRun());
-  appRoot.querySelector<HTMLButtonElement>("[data-action='new-session']")?.addEventListener("click", () => void createSession());
+  appRoot.querySelector<HTMLButtonElement>("[data-action='new-work']")?.addEventListener("click", () => void createWork());
 }
 
-async function createSession(): Promise<void> {
-  if (!gateway || !canCreateSession()) return;
-  state = { ...state, isCreatingSession: true, statusText: "正在创建 OpenClaw session" };
+async function createWork(): Promise<void> {
+  await createWorkFromGateway({ statusText: "正在创建 OpenClaw 工作" });
+}
+
+async function createWorkFromGateway(options: { initialTitle?: string; statusText?: string } = {}): Promise<string | undefined> {
+  if (!gateway || !canCreateWork()) return undefined;
+  state = { ...state, isCreatingSession: true, statusText: options.statusText ?? "正在创建 OpenClaw 工作" };
   render();
 
   const result = await gateway.request("sessions.create", {}).catch((error) => {
@@ -382,19 +464,34 @@ async function createSession(): Promise<void> {
   });
   const [session] = normalizeSessions([result]);
   if (session) {
+    const entry = createWorkIndexEntry({
+      targetSessionKey: session.sessionKey,
+      targetSessionId: session.sessionId,
+      title: options.initialTitle,
+      titleSource: options.initialTitle ? "first-message" : "fallback"
+    });
+    const workIndex: WorkIndex = { version: 1, items: [entry, ...state.workIndex.items] };
+    saveWorkIndex(workIndex);
+    const sessions = upsertSession(state.sessions, session);
+    const workItems = projectWorkItems({ workIndex, sessions, activeSessionKey: session.sessionKey });
     state = {
       ...state,
-      sessions: upsertSession(state.sessions, session),
-      activeSessionId: session.id,
+      workIndex,
+      workItems,
+      sessions,
+      activeWorkId: entry.id,
+      activeSessionId: session.sessionKey,
       chat: { messages: [], running: false },
       isCreatingSession: false,
-      statusText: "新会话已创建"
+      statusText: "新工作已创建"
     };
     render();
+    return session.sessionKey;
   } else {
     await loadSessions({ loadHistoryForActive: true });
     state = { ...state, isCreatingSession: false };
     render();
+    return state.activeSessionId;
   }
 }
 
@@ -409,24 +506,99 @@ function upsertSession(sessions: SessionSummary[], nextSession: SessionSummary):
   return [nextSession, ...sessions.slice(0, existingIndex), ...sessions.slice(existingIndex + 1)];
 }
 
-function renderSessions(): string {
-  if (!state.sessions.length) {
-    return `<div class="empty-sessions">未发现 Gateway sessions</div>`;
+async function openWorkItem(workId: string): Promise<void> {
+  const work = state.workItems.find((item) => item.id === workId);
+  if (!work) return;
+  const workIndex = markWorkItemOpened(ensureWorkIndexed(work), work.id);
+  saveWorkIndex(workIndex);
+  const workItems = projectWorkItems({ workIndex, sessions: state.sessions, activeSessionKey: work.targetSessionKey });
+  state = { ...state, workIndex, workItems, activeWorkId: work.id, activeSessionId: work.targetSessionKey };
+  render();
+  await loadHistory(work.targetSessionKey);
+}
+
+async function promoteGatewaySession(sessionId: string): Promise<void> {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  const workIndex = promoteSessionToWorkItem(state.workIndex, session);
+  saveWorkIndex(workIndex);
+  const workItems = projectWorkItems({ workIndex, sessions: state.sessions, activeSessionKey: session.sessionKey });
+  const activeWork = workItems.find((work) => work.targetSessionKey === session.sessionKey);
+  state = { ...state, workIndex, workItems, activeWorkId: activeWork?.id, activeSessionId: session.sessionKey };
+  render();
+  await loadHistory(session.sessionKey);
+}
+
+function ensureWorkIndexed(work: WorkItem): WorkIndex {
+  if (state.workIndex.items.some((item) => item.id === work.id)) return state.workIndex;
+  const session = state.sessions.find((item) => item.sessionKey === work.targetSessionKey);
+  if (session) return promoteSessionToWorkItem(state.workIndex, session);
+  return {
+    version: 1,
+    items: [
+      createWorkIndexEntry({
+        id: work.id,
+        targetSessionKey: work.targetSessionKey,
+        targetSessionId: work.targetSessionId,
+        title: work.title,
+        titleSource: work.titleSource,
+        source: work.source,
+        kind: work.kind
+      }),
+      ...state.workIndex.items
+    ]
+  };
+}
+
+function renderWorkItems(): string {
+  if (!state.workItems.length) {
+    return `<div class="empty-sessions">还没有工作</div>`;
   }
-  return state.sessions
+  return state.workItems
     .map(
-      (session) => `
-        <button class="session-row ${session.id === state.activeSessionId ? "active" : ""}" data-session-id="${escapeHtml(session.id)}" type="button">
-          <span class="state-dot ${session.status}"></span>
+      (work) => `
+        <button class="session-row ${work.id === state.activeWorkId ? "active" : ""}" data-work-id="${escapeHtml(work.id)}" type="button">
+          <span class="state-dot ${work.status ?? "unknown"}"></span>
           <span class="session-main">
-            <strong>${escapeHtml(session.title)}</strong>
-            <em>${escapeHtml(session.subtitle)}</em>
+            <strong>${escapeHtml(work.title)}</strong>
+            <em>${escapeHtml(work.subtitle ?? "OpenClaw · local workspace")}</em>
           </span>
-          <time>${escapeHtml(formatRelative(session.updatedAt))}</time>
+          <time>${escapeHtml(formatRelativeTimestamp(work.lastOpenedAt ?? work.updatedAt))}</time>
         </button>
       `
     )
     .join("");
+}
+
+function renderGatewaySessionsPanel(): string {
+  if (!state.sessions.length) {
+    return `
+      <details class="gateway-sessions-panel">
+        <summary>运行时会话</summary>
+        <div class="empty-sessions">暂无 Gateway sessions</div>
+      </details>
+    `;
+  }
+  const rows = state.sessions
+    .map(
+      (session) => `
+        <div class="gateway-session-row">
+          <span class="state-dot ${session.status}"></span>
+          <span class="session-main">
+            <strong>${escapeHtml(session.title)}</strong>
+            <em>${escapeHtml(session.sessionKey)}</em>
+          </span>
+          <button type="button" data-promote-session-id="${escapeHtml(session.id)}" title="加入工作">+</button>
+        </div>
+      `
+    )
+    .join("");
+  return `
+    <details class="gateway-sessions-panel">
+      <summary>运行时会话</summary>
+      <div class="gateway-session-list">${rows}</div>
+    </details>
+  `;
 }
 
 function renderDiagnostics(): string {
@@ -497,7 +669,7 @@ function canSubmit(): boolean {
   return state.connection === "connected";
 }
 
-function canCreateSession(): boolean {
+function canCreateWork(): boolean {
   return state.connection === "connected" && !state.isCreatingSession && (gateway?.capabilities.methods.has("sessions.create") ?? false);
 }
 
@@ -633,6 +805,11 @@ function noticeLabel(kind: ConversationNotice["kind"]): string {
     fallback: "model",
     error: "error"
   }[kind];
+}
+
+function formatRelativeTimestamp(value?: number): string {
+  if (!value) return "";
+  return formatRelative(new Date(value).toISOString());
 }
 
 function formatRelative(value?: string): string {

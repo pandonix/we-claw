@@ -16,6 +16,13 @@ function asString(value: unknown): string | undefined {
   return text ? text : undefined;
 }
 
+function asTimestamp(value: unknown): string | undefined {
+  const text = asString(value);
+  if (text) return text;
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return new Date(value).toISOString();
+}
+
 function textFromContent(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
@@ -64,7 +71,7 @@ export function normalizeSession(value: unknown): SessionSummary {
     sessionId,
     title,
     subtitle: asString(record.subtitle) ?? asString(record.workspace) ?? asString(record.agent) ?? "OpenClaw Gateway",
-    updatedAt: asString(record.updatedAt) ?? asString(record.updated_at) ?? asString(record.lastMessageAt),
+    updatedAt: asTimestamp(record.updatedAt) ?? asTimestamp(record.updated_at) ?? asTimestamp(record.lastMessageAt),
     status
   };
 }

@@ -61,6 +61,46 @@ export interface SessionSummary {
   status: SessionStatus;
 }
 
+export type WorkItemSource = "we-claw" | "gateway" | "channel" | "runtime";
+export type WorkItemKind = "task" | "conversation" | "run";
+export type WorkItemTitleSource = "user" | "first-message" | "gateway" | "manual" | "fallback";
+
+export interface WorkItem {
+  id: string;
+  title: string;
+  titleSource: WorkItemTitleSource;
+  subtitle?: string;
+  targetSessionKey: string;
+  targetSessionId?: string;
+  source: WorkItemSource;
+  kind: WorkItemKind;
+  createdAt: number;
+  updatedAt: number;
+  lastOpenedAt?: number;
+  pinned?: boolean;
+  hidden?: boolean;
+  running?: boolean;
+  status?: SessionStatus;
+}
+
+export interface WorkIndexEntry {
+  id: string;
+  targetSessionKey: string;
+  title?: string;
+  titleSource?: WorkItemTitleSource;
+  source: WorkItemSource;
+  kind: WorkItemKind;
+  createdAt: number;
+  lastOpenedAt?: number;
+  pinned?: boolean;
+  hidden?: boolean;
+}
+
+export interface WorkIndex {
+  version: 1;
+  items: WorkIndexEntry[];
+}
+
 export type MessageRole = "user" | "assistant" | "system" | "error";
 
 export interface TranscriptMessage {
