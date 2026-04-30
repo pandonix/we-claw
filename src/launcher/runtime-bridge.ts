@@ -155,6 +155,18 @@ export function claudeStreamDeltaText(message: unknown): string | undefined {
   return asString(delta.text);
 }
 
+export function claudeSessionMigrationFrame(fromSessionKey: string, toSessionKey: string, sessionId: string): GatewayFrame {
+  return {
+    type: "event",
+    event: "session.migrated",
+    payload: {
+      fromSessionKey,
+      toSessionKey,
+      sessionId
+    }
+  };
+}
+
 async function bridgeLocalRuntimeWebSocket(
   request: http.IncomingMessage,
   socket: Duplex,
@@ -457,11 +469,32 @@ class ClaudeAgentSdkRuntime {
   private captureSessionId(localSession: LocalClaudeSession, message: unknown): void {
     const record = asRecord(message);
     const sessionId = asString(record.session_id);
-    if (!sessionId || localSession.sessionId === sessionId) return;
+    if (!sessionId) return;
     const previousSessionKey = localSession.sessionKey;
+    const nextSessionKey = `${CLAUDE_SESSION_PREFIX}${sessionId}`;
+    if (localSession.sessionId === sessionId && previousSessionKey === nextSessionKey) return;
     localSession.sessionId = sessionId;
-    this.mirrorMessageSubscribers(previousSessionKey, localSession.sessionKey);
+    if (previousSessionKey !== nextSessionKey) {
+      this.rekeyLocalSession(localSession, previousSessionKey, nextSessionKey);
+      this.broadcastSessionMigration(previousSessionKey, nextSessionKey, sessionId);
+    }
     this.emitSessionsChanged();
+  }
+
+  private rekeyLocalSession(localSession: LocalClaudeSession, fromSessionKey: string, toSessionKey: string): void {
+    localSession.sessionKey = toSessionKey;
+    if (this.localSessions.get(fromSessionKey) === localSession) this.localSessions.delete(fromSessionKey);
+    this.localSessions.set(toSessionKey, localSession);
+    const activeRun = this.activeRuns.get(fromSessionKey);
+    if (activeRun) {
+      this.activeRuns.delete(fromSessionKey);
+      this.activeRuns.set(toSessionKey, activeRun);
+    }
+    this.mirrorMessageSubscribers(fromSessionKey, toSessionKey);
+  }
+
+  private broadcastSessionMigration(fromSessionKey: string, toSessionKey: string, sessionId: string): void {
+    this.broadcast(claudeSessionMigrationFrame(fromSessionKey, toSessionKey, sessionId));
   }
 
   private recordAssistantMessage(localSession: LocalClaudeSession, text: string): void {

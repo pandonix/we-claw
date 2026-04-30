@@ -45,6 +45,7 @@ export function createWorkIndexEntry(params: CreateWorkIndexEntryParams): WorkIn
   return {
     id: params.id ?? `work:${randomId()}`,
     targetSessionKey,
+    targetSessionId: normalizeOptionalText(params.targetSessionId),
     title: normalizeOptionalText(params.title),
     titleSource: params.titleSource ?? (params.title ? "first-message" : "fallback"),
     source: params.source ?? "we-claw",
@@ -54,6 +55,47 @@ export function createWorkIndexEntry(params: CreateWorkIndexEntryParams): WorkIn
     pinned: false,
     hidden: false
   };
+}
+
+export function migrateWorkSessionKey(
+  workIndex: WorkIndex,
+  fromSessionKey: string,
+  toSessionKey: string,
+  targetSessionId?: string
+): WorkIndex {
+  const fromKey = normalizeOptionalText(fromSessionKey);
+  const toKey = normalizeOptionalText(toSessionKey);
+  if (!fromKey || !toKey || fromKey === toKey) return workIndex;
+
+  const fromEntry = workIndex.items.find((item) => item.targetSessionKey === fromKey);
+  if (!fromEntry) return workIndex;
+  const existingEntry = workIndex.items.find((item) => item.targetSessionKey === toKey);
+  const mergedEntry = mergeMigratedWorkEntry(fromEntry, existingEntry, toKey, targetSessionId);
+  let inserted = false;
+  const items: WorkIndexEntry[] = [];
+
+  for (const item of workIndex.items) {
+    if (item.targetSessionKey !== fromKey && item.targetSessionKey !== toKey) {
+      items.push(item);
+      continue;
+    }
+    if (inserted) continue;
+    items.push(mergedEntry);
+    inserted = true;
+  }
+
+  return { version: WORK_INDEX_VERSION, items };
+}
+
+export function reconcileClaudePendingWorkIndex(workIndex: WorkIndex, sessions: SessionSummary[]): WorkIndex {
+  let next = workIndex;
+  for (const entry of workIndex.items) {
+    if (!entry.targetSessionKey.startsWith("claude:pending:")) continue;
+    const session = findClaudePendingMatch(entry, sessions);
+    if (!session) continue;
+    next = migrateWorkSessionKey(next, entry.targetSessionKey, session.sessionKey, session.sessionId);
+  }
+  return next;
 }
 
 export function projectWorkItems(params: ProjectWorkItemsParams): WorkItem[] {
@@ -158,7 +200,7 @@ function workItemFromEntry(entry: WorkIndexEntry, session: SessionSummary | unde
     titleSource: entry.title ? (entry.titleSource ?? "user") : sessionTitle ? "gateway" : "fallback",
     subtitle: session?.subtitle ?? DEFAULT_WORK_SUBTITLE,
     targetSessionKey: entry.targetSessionKey,
-    targetSessionId: session?.sessionId,
+    targetSessionId: session?.sessionId ?? entry.targetSessionId,
     source: entry.source,
     kind: entry.kind,
     createdAt: entry.createdAt,
@@ -169,6 +211,48 @@ function workItemFromEntry(entry: WorkIndexEntry, session: SessionSummary | unde
     running: session?.status === "running",
     status: session?.status ?? "unknown"
   };
+}
+
+function mergeMigratedWorkEntry(fromEntry: WorkIndexEntry, existingEntry: WorkIndexEntry | undefined, toSessionKey: string, targetSessionId: string | undefined): WorkIndexEntry {
+  const titleEntry = preferredTitleEntry(fromEntry, existingEntry);
+  return {
+    ...fromEntry,
+    id: fromEntry.id,
+    targetSessionKey: toSessionKey,
+    targetSessionId: normalizeOptionalText(targetSessionId) ?? existingEntry?.targetSessionId ?? fromEntry.targetSessionId,
+    title: titleEntry?.title,
+    titleSource: titleEntry?.titleSource,
+    source: fromEntry.source,
+    kind: fromEntry.kind,
+    createdAt: Math.min(fromEntry.createdAt, existingEntry?.createdAt ?? fromEntry.createdAt),
+    lastOpenedAt: Math.max(fromEntry.lastOpenedAt ?? 0, existingEntry?.lastOpenedAt ?? 0) || undefined,
+    pinned: Boolean(fromEntry.pinned || existingEntry?.pinned),
+    hidden: fromEntry.hidden === true && existingEntry?.hidden === true
+  };
+}
+
+function preferredTitleEntry(fromEntry: WorkIndexEntry, existingEntry: WorkIndexEntry | undefined): WorkIndexEntry | undefined {
+  if (existingEntry?.title && titleIsUserControlled(existingEntry.titleSource)) return existingEntry;
+  if (fromEntry.title) return fromEntry;
+  if (existingEntry?.title) return existingEntry;
+  return fromEntry;
+}
+
+function findClaudePendingMatch(entry: WorkIndexEntry, sessions: SessionSummary[]): SessionSummary | undefined {
+  const entryTitle = normalizeOptionalText(entry.title);
+  if (!entryTitle) return undefined;
+  const candidates = sessions
+    .filter((session) => session.sessionKey.startsWith("claude:") && !session.sessionKey.startsWith("claude:pending:"))
+    .filter((session) => normalizeOptionalText(session.title) === entryTitle);
+  if (!candidates.length) return undefined;
+  return candidates.sort((a, b) => pendingMatchScore(b, entry) - pendingMatchScore(a, entry))[0];
+}
+
+function pendingMatchScore(session: SessionSummary, entry: WorkIndexEntry): number {
+  const updatedAt = timestampFromSession(session) ?? 0;
+  const createdAt = entry.createdAt || 0;
+  const distancePenalty = updatedAt && createdAt ? Math.min(Math.abs(updatedAt - createdAt), 86_400_000) : 86_400_000;
+  return updatedAt - distancePenalty;
 }
 
 function shouldExposeGatewaySession(session: SessionSummary, activeSessionKey: string | undefined): boolean {
@@ -204,6 +288,7 @@ function normalizeWorkIndexEntry(value: unknown, now: number): WorkIndexEntry | 
   return {
     id: asString(record.id) ?? workIdForSessionKey(targetSessionKey),
     targetSessionKey,
+    targetSessionId: asString(record.targetSessionId),
     title: normalizeOptionalText(record.title),
     titleSource: normalizeTitleSource(record.titleSource),
     source,

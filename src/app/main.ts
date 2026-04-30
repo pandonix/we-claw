@@ -5,8 +5,10 @@ import {
   applyWorkTitleFromHistory,
   createWorkIndexEntry,
   markWorkItemOpened,
+  migrateWorkSessionKey,
   normalizeWorkIndex,
   projectWorkItems,
+  reconcileClaudePendingWorkIndex,
   promoteSessionToWorkItem
 } from "../shared/work-items";
 import "./styles.css";
@@ -136,6 +138,10 @@ async function connectGateway(url: string): Promise<void> {
         handleSessionMessageEvent(frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame);
         return;
       }
+      if (frame.event === "session.migrated") {
+        handleSessionMigratedEvent(frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame);
+        return;
+      }
       if (frame.type === "sessions.changed" || frame.event === "sessions.changed") {
         void loadSessions();
         return;
@@ -184,14 +190,16 @@ async function loadSessions(options: { loadHistoryForActive?: boolean; showRefre
     if (result === undefined) return;
 
     const sessions = applyCachedTitles(normalizeSessions(result));
+    const workIndex = reconcileClaudePendingWorkIndex(state.workIndex, sessions);
+    if (workIndex !== state.workIndex) saveWorkIndex(workIndex);
     const projection = projectActiveWork({
       sessions,
-      workIndex: state.workIndex,
+      workIndex,
       activeWorkId: state.activeWorkId,
       activeSessionId: state.activeSessionId
     });
     const statusText = options.showRefreshing && (!projection.activeSessionId || !options.loadHistoryForActive) ? "工作列表已刷新" : state.statusText;
-    state = { ...state, sessions, workItems: projection.workItems, activeWorkId: projection.activeWorkId, activeSessionId: projection.activeSessionId, statusText };
+    state = { ...state, sessions, workIndex, workItems: projection.workItems, activeWorkId: projection.activeWorkId, activeSessionId: projection.activeSessionId, statusText };
     render();
     if (projection.activeSessionId && options.loadHistoryForActive) await loadHistory(projection.activeSessionId);
   } finally {
@@ -746,6 +754,32 @@ async function refreshSessions(): Promise<void> {
   await loadSessions({ loadHistoryForActive: true, showRefreshing: true });
 }
 
+function handleSessionMigratedEvent(event: unknown): void {
+  const migration = normalizeSessionMigration(event);
+  if (!migration) return;
+  const workIndex = migrateWorkSessionKey(state.workIndex, migration.fromSessionKey, migration.toSessionKey, migration.sessionId);
+  if (workIndex === state.workIndex) return;
+  saveWorkIndex(workIndex);
+  const sessions = state.sessions.map((session) =>
+    session.sessionKey === migration.fromSessionKey
+      ? { ...session, id: migration.toSessionKey, sessionKey: migration.toSessionKey, sessionId: migration.sessionId ?? session.sessionId }
+      : session
+  );
+  const activeSessionId = state.activeSessionId === migration.fromSessionKey ? migration.toSessionKey : state.activeSessionId;
+  const workItems = projectWorkItems({ workIndex, sessions, activeSessionKey: activeSessionId });
+  const activeWorkId = state.activeWorkId ?? workItems.find((work) => work.targetSessionKey === activeSessionId)?.id;
+  state = {
+    ...state,
+    workIndex,
+    sessions,
+    workItems,
+    activeSessionId,
+    activeWorkId,
+    statusText: "Claude session 已绑定到可恢复历史"
+  };
+  render();
+}
+
 function upsertSession(sessions: SessionSummary[], nextSession: SessionSummary): SessionSummary[] {
   const existingIndex = sessions.findIndex((session) => session.id === nextSession.id);
   if (existingIndex === -1) return [nextSession, ...sessions];
@@ -943,6 +977,15 @@ function runtimeDisplayName(kind: RuntimeKind): string {
 function normalizeRuntimeKind(value: string | undefined): RuntimeKind | undefined {
   if (value === "openclaw" || value === "hermes" || value === "claude-agent-sdk" || value === "cli-process") return value;
   return undefined;
+}
+
+function normalizeSessionMigration(value: unknown): { fromSessionKey: string; toSessionKey: string; sessionId?: string } | undefined {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const fromSessionKey = typeof record.fromSessionKey === "string" ? record.fromSessionKey.trim() : "";
+  const toSessionKey = typeof record.toSessionKey === "string" ? record.toSessionKey.trim() : "";
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : undefined;
+  if (!fromSessionKey || !toSessionKey || fromSessionKey === toSessionKey) return undefined;
+  return { fromSessionKey, toSessionKey, sessionId };
 }
 
 function statusFromBootstrap(bootstrapResponse: BootstrapResponse): string {

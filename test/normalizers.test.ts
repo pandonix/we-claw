@@ -27,10 +27,38 @@ describe("normalizers", () => {
           { key: "s1", displayName: "Display title", derivedTitle: "Derived title", label: "Label title", lastMessagePreview: "Preview title" },
           { key: "s2", derivedTitle: "Derived title", label: "Label title", lastMessagePreview: "Preview title" },
           { key: "s3", label: "Label title", lastMessagePreview: "Preview title" },
-          { key: "s4", lastMessagePreview: "Preview title" }
+          { key: "s4", title: "Runtime title", lastMessagePreview: "Preview title" },
+          { key: "s5", lastMessagePreview: "Preview title" }
         ]
       }).map((session) => session.title)
-    ).toEqual(["Display title", "Derived title", "Label title", "Preview title"]);
+    ).toEqual(["Display title", "Derived title", "Label title", "Runtime title", "Preview title"]);
+  });
+
+  it("preserves Claude runtime bridge titles", () => {
+    expect(
+      normalizeSessions({
+        sessions: [
+          {
+            id: "claude:session-1",
+            sessionKey: "claude:session-1",
+            sessionId: "session-1",
+            title: "hello",
+            subtitle: "Claude Agent SDK · /tmp/project",
+            status: "idle"
+          }
+        ]
+      })
+    ).toEqual([
+      {
+        id: "claude:session-1",
+        sessionKey: "claude:session-1",
+        sessionId: "session-1",
+        title: "hello",
+        subtitle: "Claude Agent SDK · /tmp/project",
+        updatedAt: undefined,
+        status: "idle"
+      }
+    ]);
   });
 
   it("normalizes preview whitespace and truncates summary-backed session titles", () => {

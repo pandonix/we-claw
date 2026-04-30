@@ -60,7 +60,7 @@ export function normalizeSession(value: unknown): SessionSummary {
   const sessionKey = asString(record.key) ?? asString(record.sessionKey) ?? directKey ?? asString(record.id) ?? asString(record.sessionId) ?? "unknown";
   const sessionId = asString(record.sessionId) ?? asString(record.id);
   const title =
-    readableSessionTitle([record.displayName, record.derivedTitle, record.label], sessionKey, sessionId) ??
+    readableSessionTitle([record.displayName, record.derivedTitle, record.label, record.title], sessionKey, sessionId) ??
     readableSessionTitle([truncateTitleCandidate(record.lastMessagePreview)], sessionKey, sessionId) ??
     UNTITLED_SESSION;
   const status = normalizeStatus(record.status, record.running);

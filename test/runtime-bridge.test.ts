@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claudeStreamDeltaText, normalizeClaudeHistory, normalizeClaudeHistoryMessages, normalizeClaudeSession } from "../src/launcher/runtime-bridge";
+import { claudeSessionMigrationFrame, claudeStreamDeltaText, normalizeClaudeHistory, normalizeClaudeHistoryMessages, normalizeClaudeSession } from "../src/launcher/runtime-bridge";
 
 describe("runtime bridge Claude normalizers", () => {
   it("maps SDK session metadata into We-Claw session summaries", () => {
@@ -74,5 +74,17 @@ describe("runtime bridge Claude normalizers", () => {
         event: { type: "content_block_delta", delta: { type: "text_delta", text: "partial" } }
       })
     ).toBe("partial");
+  });
+
+  it("emits a stable session migration event shape", () => {
+    expect(claudeSessionMigrationFrame("claude:pending:123", "claude:real-session", "real-session")).toEqual({
+      type: "event",
+      event: "session.migrated",
+      payload: {
+        fromSessionKey: "claude:pending:123",
+        toSessionKey: "claude:real-session",
+        sessionId: "real-session"
+      }
+    });
   });
 });

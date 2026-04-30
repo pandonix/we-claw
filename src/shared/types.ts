@@ -147,6 +147,7 @@ export interface WorkItem {
 export interface WorkIndexEntry {
   id: string;
   targetSessionKey: string;
+  targetSessionId?: string;
   title?: string;
   titleSource?: WorkItemTitleSource;
   source: WorkItemSource;

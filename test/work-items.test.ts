@@ -5,8 +5,10 @@ import {
   applyWorkTitleFromHistory,
   createWorkIndexEntry,
   markWorkItemOpened,
+  migrateWorkSessionKey,
   normalizeWorkIndex,
   projectWorkItems,
+  reconcileClaudePendingWorkIndex,
   promoteSessionToWorkItem,
   UNTITLED_WORK
 } from "../src/shared/work-items";
@@ -45,6 +47,7 @@ describe("work item projection", () => {
         {
           id: "work:1",
           targetSessionKey: "agent:main:dashboard:1",
+          targetSessionId: undefined,
           title: undefined,
           titleSource: undefined,
           source: "gateway",
@@ -56,6 +59,129 @@ describe("work item projection", () => {
         }
       ]
     });
+  });
+
+  it("migrates pending Claude work to the real session key", () => {
+    const workIndex: WorkIndex = {
+      version: 1,
+      items: [
+        {
+          ...createWorkIndexEntry({
+            id: "work:pending",
+            targetSessionKey: "claude:pending:123",
+            title: "Investigate history restore",
+            titleSource: "first-message",
+            now
+          }),
+          pinned: true
+        }
+      ]
+    };
+
+    const migrated = migrateWorkSessionKey(workIndex, "claude:pending:123", "claude:real-session", "real-session");
+
+    expect(migrated.items).toHaveLength(1);
+    expect(migrated.items[0]).toMatchObject({
+      id: "work:pending",
+      targetSessionKey: "claude:real-session",
+      targetSessionId: "real-session",
+      title: "Investigate history restore",
+      titleSource: "first-message",
+      pinned: true
+    });
+  });
+
+  it("merges duplicate pending and real Claude work entries during migration", () => {
+    const pending = createWorkIndexEntry({
+      id: "work:pending",
+      targetSessionKey: "claude:pending:123",
+      title: "Prompt title",
+      titleSource: "first-message",
+      now
+    });
+    const existing = {
+      ...createWorkIndexEntry({
+        id: "work:real",
+        targetSessionKey: "claude:real-session",
+        title: "Manual title",
+        titleSource: "manual",
+        now: now - 1000
+      }),
+      lastOpenedAt: now + 1000,
+      pinned: true
+    };
+
+    const migrated = migrateWorkSessionKey({ version: 1, items: [pending, existing] }, "claude:pending:123", "claude:real-session", "real-session");
+
+    expect(migrated.items).toHaveLength(1);
+    expect(migrated.items[0]).toMatchObject({
+      id: "work:pending",
+      targetSessionKey: "claude:real-session",
+      targetSessionId: "real-session",
+      title: "Manual title",
+      titleSource: "manual",
+      createdAt: now - 1000,
+      lastOpenedAt: now + 1000,
+      pinned: true
+    });
+  });
+
+  it("reconciles orphaned Claude pending work to the closest matching persisted session", () => {
+    const workIndex: WorkIndex = {
+      version: 1,
+      items: [
+        createWorkIndexEntry({
+          id: "work:pending",
+          targetSessionKey: "claude:pending:123",
+          title: "hello",
+          titleSource: "first-message",
+          now
+        })
+      ]
+    };
+
+    const reconciled = reconcileClaudePendingWorkIndex(workIndex, [
+      session({
+        sessionKey: "claude:older",
+        sessionId: "older",
+        title: "hello",
+        subtitle: "Claude Agent SDK",
+        updatedAt: new Date(now - 60_000).toISOString()
+      }),
+      session({
+        sessionKey: "claude:closest",
+        sessionId: "closest",
+        title: "hello",
+        subtitle: "Claude Agent SDK",
+        updatedAt: new Date(now + 3_000).toISOString()
+      })
+    ]);
+
+    expect(reconciled.items[0]).toMatchObject({
+      id: "work:pending",
+      targetSessionKey: "claude:closest",
+      targetSessionId: "closest",
+      title: "hello"
+    });
+  });
+
+  it("leaves Claude pending work unchanged when no title match is available", () => {
+    const workIndex: WorkIndex = {
+      version: 1,
+      items: [createWorkIndexEntry({ id: "work:pending", targetSessionKey: "claude:pending:123", title: "hello", now })]
+    };
+
+    expect(
+      reconcileClaudePendingWorkIndex(workIndex, [
+        session({
+          sessionKey: "claude:other",
+          sessionId: "other",
+          title: "different",
+          subtitle: "Claude Agent SDK",
+          updatedAt: new Date(now).toISOString()
+        })
+      ])
+    ).toBe(workIndex);
   });
 
   it("projects only stored work items from gateway session rows by default", () => {
