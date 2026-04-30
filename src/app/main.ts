@@ -197,6 +197,9 @@ async function loadHistory(sessionId: string, options: { preserveRuntimeBlocks?:
   });
   if (requestSeq !== historyRequestSeq || state.activeSessionId !== sessionId) return;
   const messages = normalizeHistory(history);
+  const historyRecord = history && typeof history === "object" ? (history as { toolBlocks?: unknown; notices?: unknown }) : {};
+  const historyToolBlocks = Array.isArray(historyRecord.toolBlocks) ? (historyRecord.toolBlocks as ToolBlock[]) : undefined;
+  const historyNotices = Array.isArray(historyRecord.notices) ? (historyRecord.notices as ConversationNotice[]) : undefined;
   const sessions = applyHistoryTitle(sessionId, messages);
   const workIndex = applyWorkTitleFromHistory(state.workIndex, sessionId, messages);
   if (workIndex !== state.workIndex) saveWorkIndex(workIndex);
@@ -208,8 +211,8 @@ async function loadHistory(sessionId: string, options: { preserveRuntimeBlocks?:
     workItems,
     chat: {
       messages,
-      toolBlocks: options.preserveRuntimeBlocks ? state.chat.toolBlocks : undefined,
-      notices: options.preserveRuntimeBlocks ? state.chat.notices : undefined,
+      toolBlocks: historyToolBlocks ?? (options.preserveRuntimeBlocks ? state.chat.toolBlocks : undefined),
+      notices: historyNotices ?? (options.preserveRuntimeBlocks ? state.chat.notices : undefined),
       running: false
     },
     statusText: "会话历史已加载"

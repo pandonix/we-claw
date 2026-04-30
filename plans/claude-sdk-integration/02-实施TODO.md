@@ -30,13 +30,15 @@
 - [x] `result` 消息收敛 running 状态
 - [x] SDK history message 映射为 `TranscriptMessage`
 - [x] SDK session metadata 映射为 `SessionSummary`
-- [x] tool_use block 映射为 compact tool row
+- [x] tool_use / tool_result block 映射为 compact tool row，并在缺少结果时于历史加载阶段收敛状态
+- [x] `chat.history` 返回 `messages`、`toolBlocks`、`notices`，避免刷新后丢失工具与 runtime 事件
 
 ## 4. 前端接线
 
 - [x] Bootstrap 连接 `/api/runtime/ws`
 - [x] UI 文案从固定 OpenClaw/Gateway 改为 runtime-aware
 - [x] 保留现有 session rail / composer / transcript 结构
+- [x] Claude runtime 的 `sessions.subscribe` / `sessions.messages.subscribe` 维护真实连接订阅并推送变更事件
 
 ## 5. 后续
 

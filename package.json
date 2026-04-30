@@ -16,13 +16,13 @@
   "engines": {
     "node": ">=22.12.0"
   },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.123"
-  },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3",
     "vite": "^6.3.4",
     "vitest": "^3.1.2"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.123"
   }
 }

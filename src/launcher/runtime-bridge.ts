@@ -5,8 +5,8 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import { URL } from "node:url";
-import { getSessionMessages, listSessions, query, type Options, type Query } from "@anthropic-ai/claude-agent-sdk";
-import type { GatewayFrame, RuntimeBootstrap, RuntimeCapabilities, RuntimeKind, RuntimeTransport, SessionSummary, TranscriptMessage } from "../shared/types";
+import type { Options, Query } from "@anthropic-ai/claude-agent-sdk";
+import type { ConversationNotice, GatewayFrame, RuntimeBootstrap, RuntimeCapabilities, RuntimeKind, RuntimeTransport, SessionSummary, ToolBlock, ToolBlockStatus, TranscriptMessage } from "../shared/types";
 import type { LauncherContext } from "./bootstrap.js";
 import { bridgeGatewayWebSocket } from "./gateway-bridge.js";
 import { redact } from "./redact.js";
@@ -16,12 +16,29 @@ const CLAUDE_PENDING_PREFIX = "claude:pending:";
 const CLAUDE_SESSION_PREFIX = "claude:";
 const DEFAULT_SESSION_LIMIT = 50;
 const DEFAULT_HISTORY_LIMIT = 200;
+const INTERRUPT_TIMEOUT_MS = 2_000;
 
 type UpgradeServer = {
   on(event: "upgrade", listener: (request: http.IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
 };
 
 type RuntimeEventEmitter = (frame: GatewayFrame) => void;
+type ClaudeAgentSdkModule = typeof import("@anthropic-ai/claude-agent-sdk");
+
+interface RuntimeHistory {
+  messages: TranscriptMessage[];
+  toolBlocks?: ToolBlock[];
+  notices?: ConversationNotice[];
+}
+
+interface ActiveRun {
+  controller: AbortController;
+  query?: Query;
+  emit: RuntimeEventEmitter;
+  localSession: LocalClaudeSession;
+  aborting: boolean;
+  abortEmitted: boolean;
+}
 
 interface LocalClaudeSession {
   sessionKey: string;
@@ -30,6 +47,8 @@ interface LocalClaudeSession {
   createdAt: number;
   updatedAt: number;
   messages: TranscriptMessage[];
+  toolBlocks: ToolBlock[];
+  notices: ConversationNotice[];
 }
 
 export function runtimeBridgePath(): string {
@@ -124,23 +143,7 @@ export function normalizeClaudeSession(value: unknown): SessionSummary {
 }
 
 export function normalizeClaudeHistoryMessages(messages: unknown[]): TranscriptMessage[] {
-  return messages.flatMap((item, index) => {
-    const record = asRecord(item);
-    const role = record.type === "user" || record.type === "assistant" || record.type === "system" ? record.type : undefined;
-    if (!role) return [];
-    const message = asRecord(record.message);
-    const text = visibleTextFromContent(message.content ?? message.text ?? message);
-    if (!text.trim()) return [];
-    return [
-      {
-        id: asString(record.uuid) ?? `claude-history-${index}`,
-        role,
-        text,
-        status: "final",
-        timestamp: asString(message.timestamp) ?? asString(record.timestamp)
-      }
-    ];
-  });
+  return normalizeClaudeHistory(messages).messages;
 }
 
 export function claudeStreamDeltaText(message: unknown): string | undefined {
@@ -171,6 +174,7 @@ async function bridgeLocalRuntimeWebSocket(
   }
 
   acceptBrowserSocket(socket, key);
+  const emit: RuntimeEventEmitter = (eventFrame) => sendTextFrame(socket, JSON.stringify(eventFrame));
   sendTextFrame(socket, JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: crypto.randomUUID() } }));
 
   let buffer = head.length ? Buffer.from(head) : Buffer.alloc(0);
@@ -189,13 +193,17 @@ async function bridgeLocalRuntimeWebSocket(
         continue;
       }
       if (parsed.opcode !== 1) continue;
-      void handleRuntimeFrame(parsed.payload.toString("utf8"), socket, context, claudeRuntime);
+      void handleRuntimeFrame(parsed.payload.toString("utf8"), socket, context, claudeRuntime, emit);
     }
   });
-  socket.on("error", () => socket.destroy());
+  socket.on("close", () => claudeRuntime.unsubscribeAll(emit));
+  socket.on("error", () => {
+    claudeRuntime.unsubscribeAll(emit);
+    socket.destroy();
+  });
 }
 
-async function handleRuntimeFrame(frameText: string, socket: Duplex, context: LauncherContext, claudeRuntime: ClaudeAgentSdkRuntime): Promise<void> {
+async function handleRuntimeFrame(frameText: string, socket: Duplex, context: LauncherContext, claudeRuntime: ClaudeAgentSdkRuntime, emit: RuntimeEventEmitter): Promise<void> {
   let frame: GatewayFrame;
   try {
     frame = JSON.parse(frameText) as GatewayFrame;
@@ -205,7 +213,6 @@ async function handleRuntimeFrame(frameText: string, socket: Duplex, context: La
   }
   if (frame.type !== "req" || !frame.method) return;
 
-  const emit: RuntimeEventEmitter = (eventFrame) => sendTextFrame(socket, JSON.stringify(eventFrame));
   try {
     const payload = await dispatchRuntimeRequest(frame.method, frame.params, context, claudeRuntime, emit);
     sendTextFrame(socket, JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
@@ -231,16 +238,17 @@ async function dispatchRuntimeRequest(
 ): Promise<unknown> {
   if (method === "connect") return { methods: runtimeMethods(runtimeKind(context)), runtime: runtimeBootstrap(context, gatewayRuntimePlaceholder()) };
   if (method === "health") return { ready: true, runtime: runtimeKind(context) };
-  if (method === "sessions.subscribe" || method === "sessions.messages.subscribe") return { subscribed: true };
-  if (method === "sessions.messages.unsubscribe") return { subscribed: false };
+  if (method === "sessions.subscribe") return claudeRuntime.subscribeSessions(emit);
+  if (method === "sessions.messages.subscribe") return claudeRuntime.subscribeSessionMessages(sessionKeyFromParams(params), emit);
+  if (method === "sessions.messages.unsubscribe") return claudeRuntime.unsubscribeSessionMessages(sessionKeyFromParams(params), emit);
 
   if (runtimeKind(context) !== "claude-agent-sdk") {
     throw new Error(`${runtimeName(runtimeKind(context))} runtime bridge is not implemented.`);
   }
 
   if (method === "sessions.list") return { sessions: await claudeRuntime.listSessions() };
-  if (method === "sessions.create") return claudeRuntime.createSession();
-  if (method === "chat.history") return { messages: await claudeRuntime.loadHistory(sessionKeyFromParams(params)) };
+  if (method === "sessions.create") return claudeRuntime.createSession(emit);
+  if (method === "chat.history") return claudeRuntime.loadHistory(sessionKeyFromParams(params));
   if (method === "chat.send") return claudeRuntime.sendPrompt(sessionKeyFromParams(params), messageFromParams(params), emit);
   if (method === "chat.abort") return claudeRuntime.abort(sessionKeyFromParams(params));
   throw new Error(`Unsupported runtime method: ${method}`);
@@ -248,12 +256,16 @@ async function dispatchRuntimeRequest(
 
 class ClaudeAgentSdkRuntime {
   private readonly localSessions = new Map<string, LocalClaudeSession>();
-  private readonly activeRuns = new Map<string, { controller: AbortController; query?: Query }>();
+  private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly sessionSubscribers = new Set<RuntimeEventEmitter>();
+  private readonly messageSubscribers = new Map<string, Set<RuntimeEventEmitter>>();
+  private sdkImport?: Promise<ClaudeAgentSdkModule>;
 
   constructor(private readonly context: LauncherContext) {}
 
   async listSessions(): Promise<SessionSummary[]> {
-    const sdkSessions = await listSessions({
+    const sdk = await this.loadSdk();
+    const sdkSessions = await sdk.listSessions({
       dir: this.context.config.claudeSdkCwd,
       limit: DEFAULT_SESSION_LIMIT
     });
@@ -266,49 +278,59 @@ class ClaudeAgentSdkRuntime {
     return [...local, ...persisted];
   }
 
-  createSession(title = "未命名会话"): SessionSummary {
+  createSession(emit?: RuntimeEventEmitter, title = "未命名会话"): SessionSummary {
     const now = Date.now();
     const session: LocalClaudeSession = {
       sessionKey: `${CLAUDE_PENDING_PREFIX}${crypto.randomUUID()}`,
       title,
       createdAt: now,
       updatedAt: now,
-      messages: []
+      messages: [],
+      toolBlocks: [],
+      notices: []
     };
     this.localSessions.set(session.sessionKey, session);
+    this.emitSessionsChanged(emit);
     return this.summaryFromLocalSession(session);
   }
 
-  async loadHistory(sessionKey: string): Promise<TranscriptMessage[]> {
+  async loadHistory(sessionKey: string): Promise<RuntimeHistory> {
     const local = this.localSessions.get(sessionKey);
-    if (local && !local.sessionId) return local.messages;
+    if (local && !local.sessionId) {
+      return { messages: local.messages, toolBlocks: local.toolBlocks, notices: local.notices };
+    }
 
     const sessionId = local?.sessionId ?? realClaudeSessionId(sessionKey);
-    if (!sessionId) return [];
+    if (!sessionId) return { messages: [], toolBlocks: [], notices: [] };
 
-    const messages = await getSessionMessages(sessionId, {
+    const sdk = await this.loadSdk();
+    const messages = await sdk.getSessionMessages(sessionId, {
       dir: this.context.config.claudeSdkCwd,
       limit: DEFAULT_HISTORY_LIMIT
     });
-    return normalizeClaudeHistoryMessages(messages);
+    return normalizeClaudeHistory(messages, sessionKey);
   }
 
   async sendPrompt(sessionKey: string, prompt: string, emit: RuntimeEventEmitter): Promise<unknown> {
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt) throw new Error("chat.send requires a non-empty message.");
     const localSession = this.localSessions.get(sessionKey) ?? this.createLocalSessionForPrompt(sessionKey, prompt);
     const userMessage: TranscriptMessage = {
       id: `user:${Date.now()}`,
       role: "user",
-      text: prompt,
+      text: trimmedPrompt,
       status: "final",
       timestamp: new Date().toISOString()
     };
     localSession.messages.push(userMessage);
     localSession.updatedAt = Date.now();
+    this.emitSessionsChanged(emit);
 
     const controller = new AbortController();
     const options = this.queryOptions(controller, localSession);
-    const run = query({ prompt, options });
-    this.activeRuns.set(localSession.sessionKey, { controller, query: run });
+    const sdk = await this.loadSdk();
+    const run = sdk.query({ prompt: trimmedPrompt, options });
+    this.activeRuns.set(localSession.sessionKey, { controller, query: run, emit, localSession, aborting: false, abortEmitted: false });
     emit(chatPayload("started", localSession.sessionKey));
 
     void this.consumeRun(run, localSession, emit);
@@ -317,9 +339,41 @@ class ClaudeAgentSdkRuntime {
 
   async abort(sessionKey: string): Promise<unknown> {
     const run = this.activeRuns.get(sessionKey);
-    run?.controller.abort();
-    await run?.query?.interrupt().catch(() => undefined);
+    if (!run) return { status: "aborted", sessionKey };
+    run.aborting = true;
+    run.controller.abort();
+    this.emitRunAbort(run);
+    await withTimeout(run.query?.interrupt() ?? Promise.resolve(), INTERRUPT_TIMEOUT_MS).catch(() => undefined);
     return { status: "aborted", sessionKey };
+  }
+
+  subscribeSessions(emit: RuntimeEventEmitter): unknown {
+    this.sessionSubscribers.add(emit);
+    return { subscribed: true };
+  }
+
+  subscribeSessionMessages(sessionKey: string, emit: RuntimeEventEmitter): unknown {
+    if (!sessionKey) return { subscribed: false };
+    const subscribers = this.messageSubscribers.get(sessionKey) ?? new Set<RuntimeEventEmitter>();
+    subscribers.add(emit);
+    this.messageSubscribers.set(sessionKey, subscribers);
+    return { subscribed: true };
+  }
+
+  unsubscribeSessionMessages(sessionKey: string, emit: RuntimeEventEmitter): unknown {
+    if (!sessionKey) return { subscribed: false };
+    const subscribers = this.messageSubscribers.get(sessionKey);
+    subscribers?.delete(emit);
+    if (subscribers?.size === 0) this.messageSubscribers.delete(sessionKey);
+    return { subscribed: false };
+  }
+
+  unsubscribeAll(emit: RuntimeEventEmitter): void {
+    this.sessionSubscribers.delete(emit);
+    for (const [sessionKey, subscribers] of this.messageSubscribers) {
+      subscribers.delete(emit);
+      if (subscribers.size === 0) this.messageSubscribers.delete(sessionKey);
+    }
   }
 
   private async consumeRun(run: Query, localSession: LocalClaudeSession, emit: RuntimeEventEmitter): Promise<void> {
@@ -333,7 +387,10 @@ class ClaudeAgentSdkRuntime {
           emit(chatPayload("delta", localSession.sessionKey, delta));
           continue;
         }
-        for (const tool of toolEventsFromClaudeMessage(message, localSession.sessionKey)) emit(tool);
+        for (const tool of toolEventsFromClaudeMessage(message, localSession.sessionKey)) {
+          this.applyToolEvent(localSession, tool);
+          emit(tool);
+        }
         const finalText = finalTextFromClaudeMessage(message);
         if (finalText) {
           sawAssistantText = true;
@@ -350,29 +407,44 @@ class ClaudeAgentSdkRuntime {
         const result = resultFromClaudeMessage(message);
         if (result) {
           if (result.isError) {
+            for (const tool of this.finalizeOpenToolEvents(localSession, "error", result.text || "Run failed")) emit(tool);
             emit(chatPayload("error", localSession.sessionKey, result.text));
           } else if (!sawAssistantText && result.text) {
+            for (const tool of this.finalizeOpenToolEvents(localSession, "result", "Tool completed")) emit(tool);
             emit(chatPayload("final", localSession.sessionKey, result.text));
           } else {
+            for (const tool of this.finalizeOpenToolEvents(localSession, "result", "Tool completed")) emit(tool);
             emit(chatPayload("final", localSession.sessionKey));
           }
+          this.emitSessionMessage(localSession.sessionKey, emit);
         }
       }
     } catch (error) {
-      const aborted = error instanceof Error && error.name === "AbortError";
-      emit(chatPayload(aborted ? "aborted" : "error", localSession.sessionKey, aborted ? "Claude Agent SDK run aborted." : redact(error instanceof Error ? error.message : String(error))));
+      const activeRun = this.activeRuns.get(localSession.sessionKey);
+      const aborted = activeRun?.aborting === true || activeRun?.controller.signal.aborted === true || isAbortError(error);
+      if (aborted) {
+        if (activeRun) this.emitRunAbort(activeRun);
+        else emit(chatPayload("aborted", localSession.sessionKey, "Claude Agent SDK run aborted."));
+        for (const tool of this.finalizeOpenToolEvents(localSession, "error", "Run aborted before tool result")) emit(tool);
+      } else {
+        emit(chatPayload("error", localSession.sessionKey, redact(error instanceof Error ? error.message : String(error))));
+      }
+      this.emitSessionMessage(localSession.sessionKey, emit);
     } finally {
       localSession.updatedAt = Date.now();
       this.activeRuns.delete(localSession.sessionKey);
-      emit({ type: "sessions.changed" });
+      this.emitSessionsChanged(emit);
     }
   }
 
   private captureSessionId(localSession: LocalClaudeSession, message: unknown): void {
     const record = asRecord(message);
     const sessionId = asString(record.session_id);
-    if (!sessionId) return;
+    if (!sessionId || localSession.sessionId === sessionId) return;
+    const previousSessionKey = localSession.sessionKey;
     localSession.sessionId = sessionId;
+    this.mirrorMessageSubscribers(previousSessionKey, localSession.sessionKey);
+    this.emitSessionsChanged();
   }
 
   private queryOptions(controller: AbortController, localSession: LocalClaudeSession): Options {
@@ -400,7 +472,9 @@ class ClaudeAgentSdkRuntime {
       title: prompt.slice(0, 64) || "未命名会话",
       createdAt: now,
       updatedAt: now,
-      messages: []
+      messages: [],
+      toolBlocks: [],
+      notices: []
     };
     this.localSessions.set(session.sessionKey, session);
     return session;
@@ -416,6 +490,78 @@ class ClaudeAgentSdkRuntime {
       updatedAt: new Date(session.updatedAt).toISOString(),
       status: this.activeRuns.has(session.sessionKey) ? "running" : "idle"
     };
+  }
+
+  private applyToolEvent(localSession: LocalClaudeSession, frame: GatewayFrame): void {
+    const payload = frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame;
+    const tool = toolBlockFromEvent(payload, localSession.sessionKey);
+    if (!tool) return;
+    const existingIndex = localSession.toolBlocks.findIndex((item) => item.toolCallId === tool.toolCallId);
+    if (existingIndex === -1) {
+      localSession.toolBlocks.push(tool);
+      return;
+    }
+    const previous = localSession.toolBlocks[existingIndex];
+    localSession.toolBlocks[existingIndex] = {
+      ...previous,
+      ...tool,
+      input: tool.input ?? previous.input,
+      output: tool.output ?? previous.output,
+      startedAt: previous.startedAt ?? tool.startedAt,
+      summary: tool.summary || previous.summary
+    };
+  }
+
+  private finalizeOpenToolEvents(localSession: LocalClaudeSession, phase: "result" | "error", summary: string): GatewayFrame[] {
+    return localSession.toolBlocks
+      .filter((tool) => tool.status === "running" || tool.status === "updated")
+      .map((tool) => {
+        const frame = toolEventFrame({
+          sessionKey: localSession.sessionKey,
+          phase,
+          toolCallId: tool.toolCallId,
+          name: tool.name,
+          output: summary
+        });
+        this.applyToolEvent(localSession, frame);
+        return frame;
+      });
+  }
+
+  private emitRunAbort(run: ActiveRun): void {
+    if (run.abortEmitted) return;
+    run.abortEmitted = true;
+    run.emit(chatPayload("aborted", run.localSession.sessionKey, "Claude Agent SDK run aborted."));
+    this.emitSessionMessage(run.localSession.sessionKey, run.emit);
+    this.emitSessionsChanged(run.emit);
+  }
+
+  private emitSessionsChanged(extraEmit?: RuntimeEventEmitter): void {
+    this.broadcast({ type: "sessions.changed" }, extraEmit);
+  }
+
+  private emitSessionMessage(sessionKey: string, extraEmit?: RuntimeEventEmitter): void {
+    this.broadcast({ type: "event", event: "session.message", payload: { sessionKey } }, extraEmit, this.messageSubscribers.get(sessionKey));
+  }
+
+  private broadcast(frame: GatewayFrame, extraEmit?: RuntimeEventEmitter, scopedSubscribers?: Set<RuntimeEventEmitter>): void {
+    const subscribers = new Set<RuntimeEventEmitter>(scopedSubscribers ?? this.sessionSubscribers);
+    if (extraEmit) subscribers.add(extraEmit);
+    for (const subscriber of subscribers) subscriber(frame);
+  }
+
+  private mirrorMessageSubscribers(fromSessionKey: string, toSessionKey: string): void {
+    if (fromSessionKey === toSessionKey) return;
+    const subscribers = this.messageSubscribers.get(fromSessionKey);
+    if (!subscribers?.size) return;
+    const next = this.messageSubscribers.get(toSessionKey) ?? new Set<RuntimeEventEmitter>();
+    for (const subscriber of subscribers) next.add(subscriber);
+    this.messageSubscribers.set(toSessionKey, next);
+  }
+
+  private loadSdk(): Promise<ClaudeAgentSdkModule> {
+    this.sdkImport ??= import("@anthropic-ai/claude-agent-sdk");
+    return this.sdkImport;
   }
 }
 
@@ -442,23 +588,84 @@ function toolEventsFromClaudeMessage(message: unknown, sessionKey: string): Gate
   const content = Array.isArray(payload.content) ? payload.content : [];
   return content.flatMap((part) => {
     const item = asRecord(part);
-    if (item.type !== "tool_use") return [];
-    const toolCallId = asString(item.id);
-    if (!toolCallId) return [];
-    return [
-      {
-        type: "event",
-        event: "session.tool",
-        payload: {
+    if (item.type === "tool_use") {
+      const toolCallId = asString(item.id);
+      if (!toolCallId) return [];
+      return [
+        toolEventFrame({
           sessionKey,
           phase: "start",
           toolCallId,
           name: asString(item.name) ?? "tool",
           input: item.input
-        }
-      }
-    ];
+        })
+      ];
+    }
+    if (item.type === "tool_result") {
+      const toolCallId = asString(item.tool_use_id);
+      if (!toolCallId) return [];
+      return [
+        toolEventFrame({
+          sessionKey,
+          phase: item.is_error === true ? "error" : "result",
+          toolCallId,
+          output: item.content
+        })
+      ];
+    }
+    return [];
   });
+}
+
+export function normalizeClaudeHistory(messages: unknown[], sessionKey = "claude:history"): RuntimeHistory {
+  const transcript: TranscriptMessage[] = [];
+  const toolBlocks = new Map<string, ToolBlock>();
+  const notices: ConversationNotice[] = [];
+
+  messages.forEach((item, index) => {
+    const record = asRecord(item);
+    const role = record.type === "user" || record.type === "assistant" || record.type === "system" ? record.type : undefined;
+    const message = asRecord(record.message);
+    const content = message.content ?? message.text ?? message;
+    const text = visibleTextFromContent(content);
+    if (role && text.trim()) {
+      transcript.push({
+        id: asString(record.uuid) ?? `claude-history-${index}`,
+        role,
+        text,
+        status: "final",
+        timestamp: asString(message.timestamp) ?? asString(record.timestamp)
+      });
+    }
+
+    for (const frame of toolEventsFromClaudeMessage({ type: record.type, message }, sessionKey)) {
+      const tool = toolBlockFromEvent(frame.payload, sessionKey);
+      if (!tool) continue;
+      const previous = toolBlocks.get(tool.toolCallId);
+      toolBlocks.set(tool.toolCallId, previous ? mergeToolBlock(previous, tool) : tool);
+    }
+
+    const subtype = asString(message.subtype) ?? asString(record.subtype);
+    if (role === "system" && subtype && subtype !== "init") {
+      notices.push({
+        id: `notice:claude:${asString(record.uuid) ?? index}`,
+        kind: subtype === "compact_boundary" ? "compaction" : "runtime",
+        text: subtype === "compact_boundary" ? "Claude conversation compacted" : `Claude system event: ${subtype}`,
+        timestamp: Date.parse(asString(message.timestamp) ?? asString(record.timestamp) ?? "") || Date.now()
+      });
+    }
+  });
+
+  const finalizedTools = [...toolBlocks.values()].map((tool) =>
+    tool.status === "running" || tool.status === "updated"
+      ? {
+          ...tool,
+          status: "completed" as const,
+          summary: tool.summary === `${tool.name} running` ? "Tool call recorded" : tool.summary
+        }
+      : tool
+  );
+  return { messages: transcript, toolBlocks: finalizedTools, notices };
 }
 
 function finalTextFromClaudeMessage(message: unknown): string | undefined {
@@ -484,18 +691,114 @@ function messageId(message: unknown): string {
 
 function sessionKeyFromParams(params: unknown): string {
   const record = asRecord(params);
-  return asString(record.sessionKey) ?? asString(record.sessionId) ?? "";
+  return asString(record.sessionKey) ?? asString(record.sessionId) ?? asString(record.key) ?? "";
 }
 
 function messageFromParams(params: unknown): string {
   const record = asRecord(params);
-  return asString(record.message) ?? asString(record.text) ?? "";
+  return asString(record.message) ?? asString(record.text) ?? asString(record.prompt) ?? "";
 }
 
 function realClaudeSessionId(sessionKey: string | undefined): string | undefined {
   if (!sessionKey) return undefined;
   if (sessionKey.startsWith(CLAUDE_PENDING_PREFIX)) return undefined;
   return sessionKey.startsWith(CLAUDE_SESSION_PREFIX) ? sessionKey.slice(CLAUDE_SESSION_PREFIX.length) : sessionKey;
+}
+
+function toolEventFrame(params: { sessionKey: string; phase: "start" | "result" | "error"; toolCallId: string; name?: string; input?: unknown; output?: unknown }): GatewayFrame {
+  return {
+    type: "event",
+    event: "session.tool",
+    payload: {
+      sessionKey: params.sessionKey,
+      phase: params.phase,
+      toolCallId: params.toolCallId,
+      name: params.name,
+      input: params.input,
+      result: params.phase === "result" ? params.output : undefined,
+      error: params.phase === "error" ? params.output : undefined
+    }
+  };
+}
+
+function toolBlockFromEvent(event: unknown, fallbackSessionKey: string): ToolBlock | undefined {
+  const record = asRecord(event);
+  const toolCallId = asString(record.toolCallId) ?? asString(record.tool_call_id) ?? asString(record.id);
+  if (!toolCallId) return undefined;
+  const phase = asString(record.phase) ?? "update";
+  const status = statusFromToolPhase(phase);
+  const name = asString(record.name) ?? "tool";
+  const outputValue = phase === "result" ? record.result : phase === "error" ? record.error : undefined;
+  const output = outputValue === undefined ? undefined : formatPayload(outputValue);
+  return {
+    id: `tool:${toolCallId}`,
+    toolCallId,
+    sessionKey: asString(record.sessionKey) ?? fallbackSessionKey,
+    name,
+    status,
+    summary: output ? firstLine(output, 96) : status === "completed" ? `${name} completed` : status === "error" ? `${name} failed` : `${name} running`,
+    input: record.input === undefined ? undefined : formatPayload(record.input),
+    output,
+    startedAt: phase === "start" ? Date.now() : undefined,
+    updatedAt: Date.now()
+  };
+}
+
+function mergeToolBlock(previous: ToolBlock, next: ToolBlock): ToolBlock {
+  return {
+    ...previous,
+    ...next,
+    name: next.name === "tool" && previous.name !== "tool" ? previous.name : next.name,
+    input: next.input ?? previous.input,
+    output: next.output ?? previous.output,
+    startedAt: previous.startedAt ?? next.startedAt,
+    summary: next.summary || previous.summary
+  };
+}
+
+function statusFromToolPhase(phase: string): ToolBlockStatus {
+  if (phase === "start") return "running";
+  if (phase === "result" || phase === "end") return "completed";
+  if (phase === "error") return "error";
+  return "updated";
+}
+
+function formatPayload(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const contentText = visibleTextFromContent(asRecord(value).content ?? value);
+  if (typeof value === "string") return value;
+  if (contentText) return contentText;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function firstLine(value: string, limit: number): string {
+  const line = value.replace(/\s+/g, " ").trim();
+  if (line.length <= limit) return line;
+  return `${line.slice(0, limit - 1)}…`;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError" || error.name === "DOMException" || /abort|interrupt/i.test(error.message);
 }
 
 function openClawCapabilities(): RuntimeCapabilities {

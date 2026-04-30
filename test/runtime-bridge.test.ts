@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claudeStreamDeltaText, normalizeClaudeHistoryMessages, normalizeClaudeSession } from "../src/launcher/runtime-bridge";
+import { claudeStreamDeltaText, normalizeClaudeHistory, normalizeClaudeHistoryMessages, normalizeClaudeSession } from "../src/launcher/runtime-bridge";
 
 describe("runtime bridge Claude normalizers", () => {
   it("maps SDK session metadata into We-Claw session summaries", () => {
@@ -30,6 +30,41 @@ describe("runtime bridge Claude normalizers", () => {
       { id: "u1", role: "user", text: "Hello", status: "final" },
       { id: "a1", role: "assistant", text: "Hi", status: "final" }
     ]);
+  });
+
+  it("preserves Claude tool calls and compact boundaries in history", () => {
+    const history = normalizeClaudeHistory([
+      {
+        type: "assistant",
+        uuid: "a-tool",
+        message: {
+          content: [{ type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "README.md" } }]
+        }
+      },
+      {
+        type: "user",
+        uuid: "u-tool-result",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "tool-1", content: [{ type: "text", text: "ok" }] }]
+        }
+      },
+      {
+        type: "system",
+        uuid: "compact-1",
+        message: { subtype: "compact_boundary" }
+      }
+    ]);
+
+    expect(history.messages).toEqual([]);
+    expect(history.toolBlocks).toHaveLength(1);
+    expect(history.toolBlocks?.[0]).toMatchObject({
+      toolCallId: "tool-1",
+      name: "Read",
+      status: "completed",
+      input: '{\n  "file_path": "README.md"\n}',
+      output: "ok"
+    });
+    expect(history.notices?.[0]).toMatchObject({ kind: "compaction", text: "Claude conversation compacted" });
   });
 
   it("extracts raw content block text deltas", () => {
