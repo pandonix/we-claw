@@ -13,14 +13,18 @@
 
 ## 2. Hermes 子进程与 JSON-RPC Client
 
-- [ ] 新增 `src/launcher/hermes-jsonrpc.ts` 或 `src/launcher/hermes-runtime.ts`，集中封装 Hermes stdio JSON-RPC，不把协议解析继续堆进 `runtime-bridge.ts`
-- [ ] 新模块通过配置中的 Python 执行 `python -m tui_gateway.entry`，使用 `WE_CLAW_HERMES_ROOT` 设置 `PYTHONPATH`，使用 `WE_CLAW_HERMES_CWD` 设置子进程 `cwd`
-- [ ] 新模块实现 request id、pending request map、request timeout、启动超时和子进程退出清理
-- [ ] 新模块解析 stdout JSON-RPC response，以及 `method: "event"` notification；协议异常统一抛出可 redaction 的 launcher error
-- [ ] 新模块收敛 stderr、spawn error、protocol error、startup timeout，供 `bootstrap.ts` 和 runtime bridge 转成 diagnostic / response error
-- [ ] 新模块暴露 `dispose()`，用于浏览器断连、launcher 退出、runtime 切换时清理 Hermes 子进程与 pending request
+- [ ] 新增 `src/launcher/hermes-jsonrpc.ts`，集中封装 Hermes stdio JSON-RPC 与子进程生命周期，不把协议解析继续堆进 `runtime-bridge.ts`
+- [ ] `src/launcher/hermes-jsonrpc.ts` 通过配置中的 Python 执行 `python -m tui_gateway.entry`，使用 `WE_CLAW_HERMES_ROOT` 设置 `PYTHONPATH`，使用 `WE_CLAW_HERMES_CWD` 设置子进程 `cwd`
+- [ ] `src/launcher/hermes-jsonrpc.ts` 实现 request id、pending request map、request timeout、启动超时和子进程退出清理
+- [ ] `src/launcher/hermes-jsonrpc.ts` 解析 stdout JSON-RPC response，以及 `method: "event"` notification；协议异常统一抛出可 redaction 的 launcher error
+- [ ] `src/launcher/hermes-jsonrpc.ts` 收敛 stderr、spawn error、protocol error、startup timeout，供 `bootstrap.ts` 和 runtime bridge 转成 diagnostic / response error
+- [ ] `src/launcher/hermes-jsonrpc.ts` 暴露 `dispose()`，用于浏览器断连、launcher 退出、runtime 切换时清理 Hermes 子进程与 pending request
+- [ ] 新增 `src/launcher/hermes-runtime.ts`，只负责 We-Claw runtime adapter、方法翻译、session 映射与事件归一化；不重复持有底层进程管理逻辑
 
 ## 3. Runtime Bridge 接线
+
+> 文件职责约定：`hermes-jsonrpc.ts` 负责 Hermes 进程与 JSON-RPC 协议，`hermes-runtime.ts` 负责 We-Claw 语义适配。
+
 
 - [ ] `src/launcher/runtime-bridge.ts`：在 `installRuntimeBridge()` 中新增 Hermes runtime 实例，OpenClaw 仍走 `bridgeGatewayWebSocket()`，Claude SDK 仍走现有 `ClaudeAgentSdkRuntime`
 - [ ] `src/launcher/runtime-bridge.ts`：在 `dispatchRuntimeRequest()` 中按 `runtimeKind(context)` 分发到 Hermes adapter，避免 Hermes 请求落入现有 "not implemented" 分支
