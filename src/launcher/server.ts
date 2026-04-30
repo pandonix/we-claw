@@ -2,7 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createReadStream, existsSync } from "node:fs";
 import http from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
+import type { RuntimeKind } from "../shared/types.js";
 import { createBootstrapSnapshot, createLauncherContext, detectOpenClaw, probeGateway, type LauncherContext } from "./bootstrap.js";
+import { parseRuntimeKind, writeLauncherSettings } from "./config.js";
 import { installGatewayBridge } from "./gateway-bridge.js";
 import { redact } from "./redact.js";
 import { installRuntimeBridge, runtimeKind } from "./runtime-bridge.js";
@@ -30,10 +32,29 @@ export async function startWeClawServer(options: { root?: string; openBrowser?: 
   }
 
   const server = http.createServer(async (request, response) => {
-    if (request.url?.startsWith("/api/bootstrap") || request.url?.startsWith("/api/gateway/status")) {
+    if (request.url?.startsWith("/api/runtime/select") && request.method === "POST") {
+      await handleRuntimeSelect(request, response, context);
+      return;
+    }
+
+    if (
+      request.url?.startsWith("/api/bootstrap") ||
+      request.url?.startsWith("/api/gateway/status") ||
+      request.url?.startsWith("/api/runtime/options")
+    ) {
       const body = await createBootstrapSnapshot(context);
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end(JSON.stringify(body));
+      return;
+    }
+
+    if (request.url?.startsWith("/api/")) {
+      sendJson(response, 404, {
+        error: {
+          message: "Unknown We-Claw API endpoint.",
+          code: "api.not-found"
+        }
+      });
       return;
     }
 
@@ -51,6 +72,64 @@ export async function startWeClawServer(options: { root?: string; openBrowser?: 
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     }
   };
+}
+
+async function handleRuntimeSelect(request: http.IncomingMessage, response: http.ServerResponse, context: LauncherContext): Promise<void> {
+  if (context.config.runtimeKindLocked) {
+    sendJson(response, 409, {
+      error: {
+        message: "Runtime selection is locked by WE_CLAW_RUNTIME.",
+        code: "runtime.locked"
+      }
+    });
+    return;
+  }
+
+  const body = await readJsonBody(request).catch((error) => {
+    sendJson(response, 400, { error: { message: error instanceof Error ? error.message : "Invalid JSON body.", code: "runtime.bad-request" } });
+    return undefined;
+  });
+  if (body === undefined) return;
+
+  const runtimeKind = parseRuntimeKind((body as { runtimeKind?: unknown }).runtimeKind);
+  if (!runtimeKind) {
+    sendJson(response, 400, {
+      error: {
+        message: "Unsupported runtime kind.",
+        code: "runtime.unsupported"
+      }
+    });
+    return;
+  }
+
+  persistRuntimeSelection(context, runtimeKind);
+  if (runtimeKind === "openclaw" && context.config.manageGateway) {
+    await ensureGateway(context);
+  }
+
+  sendJson(response, 200, await createBootstrapSnapshot(context));
+}
+
+function persistRuntimeSelection(context: LauncherContext, runtimeKind: RuntimeKind): void {
+  writeLauncherSettings({ runtimeKind }, context.config.settingsPath);
+  context.config.runtimeKind = runtimeKind;
+  context.config.runtimeKindSource = "settings";
+}
+
+function sendJson(response: http.ServerResponse, statusCode: number, value: unknown): void {
+  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(value));
+}
+
+async function readJsonBody(request: http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    if (Buffer.concat(chunks).byteLength > 64_000) throw new Error("Request body is too large.");
+  }
+  const text = Buffer.concat(chunks).toString("utf8").trim();
+  if (!text) return {};
+  return JSON.parse(text);
 }
 
 async function ensureGateway(context: LauncherContext): Promise<void> {

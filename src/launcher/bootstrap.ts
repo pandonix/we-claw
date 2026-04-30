@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
 import http from "node:http";
 import { promisify } from "node:util";
-import type { BootstrapDiagnostics, BootstrapResponse } from "../shared/types";
+import type { BootstrapDiagnostics, BootstrapResponse, RuntimeKind, RuntimeOption, RuntimeSelection, RuntimeTransport } from "../shared/types";
 import { createLauncherConfig, isNodeCompatible, type LauncherConfig } from "./config.js";
 import { resolveGatewayAuth } from "./gateway-auth.js";
 import { gatewayBridgePath } from "./gateway-bridge.js";
 import { redact } from "./redact.js";
-import { runtimeBootstrap } from "./runtime-bridge.js";
+import { detectClaudeAgentSdkVersion, runtimeBootstrap } from "./runtime-bridge.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +60,36 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
     });
   }
 
+  const runtime = runtimeBootstrap(
+    context,
+    {
+      kind: "openclaw",
+      transport: "gateway-ws",
+      name: "OpenClaw",
+      available: openclaw.available,
+      version: openclaw.version,
+      bridgePath: gatewayBridgePath(),
+      capabilities: {
+        sessions: true,
+        sessionList: true,
+        resume: true,
+        fork: false,
+        stream: true,
+        abort: true,
+        approvals: true,
+        toolEvents: true,
+        mcp: true,
+        hooks: true
+      },
+      ownership: context.managedGatewayStarted ? "managed" : gateway.reachable ? "external" : "none",
+      reachable: gateway.reachable,
+      ready: gateway.ready,
+      processState: context.managedGatewayStarted ? "running" : gateway.reachable ? "external" : "not-started",
+      error: context.gatewayError ?? gateway.error
+    },
+    openclaw.version
+  );
+
   return {
     node: {
       version: process.versions.node,
@@ -79,37 +109,82 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
       processState: context.managedGatewayStarted ? "running" : gateway.reachable ? "external" : "not-started",
       error: context.gatewayError ?? gateway.error
     },
-    runtime: runtimeBootstrap(
-      context,
-      {
-        kind: "openclaw",
-        transport: "gateway-ws",
-        name: "OpenClaw",
-        available: openclaw.available,
-        version: openclaw.version,
-        bridgePath: gatewayBridgePath(),
-        capabilities: {
-          sessions: true,
-          sessionList: true,
-          resume: true,
-          fork: false,
-          stream: true,
-          abort: true,
-          approvals: true,
-          toolEvents: true,
-          mcp: true,
-          hooks: true
-        },
-        ownership: context.managedGatewayStarted ? "managed" : gateway.reachable ? "external" : "none",
-        reachable: gateway.reachable,
-        ready: gateway.ready,
-        processState: context.managedGatewayStarted ? "running" : gateway.reachable ? "external" : "not-started",
-        error: context.gatewayError ?? gateway.error
-      },
-      openclaw.version
-    ),
+    runtime,
+    runtimeSelection: createRuntimeSelection(context, openclaw, gateway.error),
     diagnostics
   };
+}
+
+export function createRuntimeSelection(
+  context: LauncherContext,
+  openclaw: BootstrapResponse["openclaw"],
+  gatewayError?: string
+): RuntimeSelection {
+  const claudeVersion = detectClaudeAgentSdkVersion();
+  const current = context.config.runtimeKind;
+  return {
+    current,
+    configured: current,
+    source: context.config.runtimeKindSource,
+    locked: context.config.runtimeKindLocked,
+    settingsPath: context.config.settingsPath,
+    options: [
+      runtimeOption({
+        kind: "openclaw",
+        configured: current === "openclaw",
+        version: openclaw.version,
+        available: openclaw.available,
+        detail: openclaw.available ? undefined : openclaw.error ?? gatewayError
+      }),
+      runtimeOption({
+        kind: "claude-agent-sdk",
+        configured: current === "claude-agent-sdk",
+        version: claudeVersion,
+        available: Boolean(claudeVersion),
+        detail: claudeVersion ? undefined : "Claude Agent SDK package is not installed."
+      })
+    ],
+    claudeSdk: {
+      cwd: context.config.claudeSdkCwd,
+      permissionMode: context.config.claudeSdkPermissionMode,
+      allowedTools: context.config.claudeSdkAllowedTools,
+      model: context.config.claudeSdkModel
+    }
+  };
+}
+
+function runtimeOption(params: {
+  kind: RuntimeKind;
+  configured: boolean;
+  available: boolean;
+  version?: string;
+  detail?: string;
+}): RuntimeOption {
+  return {
+    kind: params.kind,
+    name: runtimeName(params.kind),
+    transport: runtimeTransport(params.kind),
+    configured: params.configured,
+    available: params.available,
+    version: params.version,
+    detail: params.detail
+  };
+}
+
+function runtimeTransport(kind: RuntimeKind): RuntimeTransport {
+  if (kind === "claude-agent-sdk") return "library-sdk";
+  if (kind === "hermes") return "stdio-jsonrpc";
+  if (kind === "cli-process") return "cli-process";
+  return "gateway-ws";
+}
+
+function runtimeName(kind: RuntimeKind): string {
+  return {
+    openclaw: "OpenClaw",
+    hermes: "Hermes",
+    "claude-agent-sdk": "Claude Agent SDK",
+    "cli-process": "CLI Process"
+  }[kind];
 }
 
 export async function detectOpenClaw(executable: string): Promise<BootstrapResponse["openclaw"]> {

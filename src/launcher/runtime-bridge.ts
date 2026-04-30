@@ -69,7 +69,7 @@ export function installRuntimeBridge(server: UpgradeServer, context: LauncherCon
 }
 
 export function runtimeKind(context: LauncherContext): RuntimeKind {
-  return context.config.runtimeKind === "auto" ? "openclaw" : context.config.runtimeKind;
+  return context.config.runtimeKind;
 }
 
 export function runtimeBootstrap(context: LauncherContext, gateway: RuntimeBootstrap, openclawVersion?: string): RuntimeBootstrap {
@@ -308,7 +308,13 @@ class ClaudeAgentSdkRuntime {
       dir: this.context.config.claudeSdkCwd,
       limit: DEFAULT_HISTORY_LIMIT
     });
-    return normalizeClaudeHistory(messages, sessionKey);
+    const history = normalizeClaudeHistory(messages, sessionKey);
+    if (!local) return history;
+    return {
+      messages: history.messages.length >= local.messages.length ? history.messages : local.messages,
+      toolBlocks: history.toolBlocks?.length ? history.toolBlocks : local.toolBlocks,
+      notices: history.notices?.length ? history.notices : local.notices
+    };
   }
 
   async sendPrompt(sessionKey: string, prompt: string, emit: RuntimeEventEmitter): Promise<unknown> {
@@ -378,12 +384,15 @@ class ClaudeAgentSdkRuntime {
 
   private async consumeRun(run: Query, localSession: LocalClaudeSession, emit: RuntimeEventEmitter): Promise<void> {
     let sawAssistantText = false;
+    let assistantFinalized = false;
+    let assistantTextBuffer = "";
     try {
       for await (const message of run) {
         this.captureSessionId(localSession, message);
         const delta = claudeStreamDeltaText(message);
         if (delta) {
           sawAssistantText = true;
+          assistantTextBuffer += delta;
           emit(chatPayload("delta", localSession.sessionKey, delta));
           continue;
         }
@@ -401,6 +410,8 @@ class ClaudeAgentSdkRuntime {
             status: "final",
             timestamp: new Date().toISOString()
           });
+          assistantFinalized = true;
+          assistantTextBuffer = finalText;
           emit(chatPayload("final", localSession.sessionKey, finalText));
           continue;
         }
@@ -410,9 +421,15 @@ class ClaudeAgentSdkRuntime {
             for (const tool of this.finalizeOpenToolEvents(localSession, "error", result.text || "Run failed")) emit(tool);
             emit(chatPayload("error", localSession.sessionKey, result.text));
           } else if (!sawAssistantText && result.text) {
+            this.recordAssistantMessage(localSession, result.text);
+            assistantFinalized = true;
             for (const tool of this.finalizeOpenToolEvents(localSession, "result", "Tool completed")) emit(tool);
             emit(chatPayload("final", localSession.sessionKey, result.text));
           } else {
+            if (!assistantFinalized && assistantTextBuffer) {
+              this.recordAssistantMessage(localSession, assistantTextBuffer);
+              assistantFinalized = true;
+            }
             for (const tool of this.finalizeOpenToolEvents(localSession, "result", "Tool completed")) emit(tool);
             emit(chatPayload("final", localSession.sessionKey));
           }
@@ -445,6 +462,18 @@ class ClaudeAgentSdkRuntime {
     localSession.sessionId = sessionId;
     this.mirrorMessageSubscribers(previousSessionKey, localSession.sessionKey);
     this.emitSessionsChanged();
+  }
+
+  private recordAssistantMessage(localSession: LocalClaudeSession, text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    localSession.messages.push({
+      id: `assistant:${Date.now()}`,
+      role: "assistant",
+      text: trimmed,
+      status: "final",
+      timestamp: new Date().toISOString()
+    });
   }
 
   private queryOptions(controller: AbortController, localSession: LocalClaudeSession): Options {
@@ -877,7 +906,7 @@ function runtimeName(kind: RuntimeKind): string {
   }[kind];
 }
 
-function detectClaudeAgentSdkVersion(): string | undefined {
+export function detectClaudeAgentSdkVersion(): string | undefined {
   try {
     const require = createRequire(import.meta.url);
     const packageJson = JSON.parse(readFileSync(join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk")), "package.json"), "utf8")) as {

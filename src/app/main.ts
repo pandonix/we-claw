@@ -1,6 +1,6 @@
 import { GatewayClient } from "../gateway/client";
 import { normalizeHistory, normalizeSessions, reduceAgentEvent, reduceChatEvent, reduceToolEvent, titleFromHistory, UNTITLED_SESSION } from "../shared/normalizers";
-import type { BootstrapResponse, ChatState, ConnectionState, ConversationNotice, SessionSummary, ToolBlock, TranscriptMessage, WorkIndex, WorkItem } from "../shared/types";
+import type { BootstrapResponse, ChatState, ConnectionState, ConversationNotice, RuntimeKind, RuntimeOption, SessionSummary, ToolBlock, TranscriptMessage, WorkIndex, WorkItem } from "../shared/types";
 import {
   applyWorkTitleFromHistory,
   createWorkIndexEntry,
@@ -27,6 +27,8 @@ interface AppState {
   statusText: string;
   isCreatingSession: boolean;
   isRefreshingSessions: boolean;
+  settingsOpen: boolean;
+  isSwitchingRuntime: boolean;
 }
 
 const maybeRoot = document.querySelector<HTMLDivElement>("#app");
@@ -35,6 +37,7 @@ const appRoot = maybeRoot;
 
 let gateway: GatewayClient | undefined;
 let historyRequestSeq = 0;
+let connectionGeneration = 0;
 let pendingSessionMessageReloadSessionKey: string | undefined;
 let subscribedSessionKey: string | undefined;
 let state: AppState = {
@@ -49,7 +52,9 @@ let state: AppState = {
   composerText: "",
   statusText: "正在读取本地启动状态",
   isCreatingSession: false,
-  isRefreshingSessions: false
+  isRefreshingSessions: false,
+  settingsOpen: false,
+  isSwitchingRuntime: false
 };
 
 render();
@@ -60,7 +65,21 @@ async function bootstrap(): Promise<void> {
     const response = await fetch("/api/bootstrap");
     if (!response.ok) throw new Error(`Bootstrap failed with ${response.status}`);
     const bootstrapResponse = (await response.json()) as BootstrapResponse;
-    state = { ...state, bootstrap: bootstrapResponse, statusText: statusFromBootstrap(bootstrapResponse) };
+    const previousScope = runtimeStorageScope(state.bootstrap);
+    const nextScope = runtimeStorageScope(bootstrapResponse);
+    const runtimeChanged = previousScope !== nextScope;
+    state = {
+      ...state,
+      bootstrap: bootstrapResponse,
+      workIndex: readWorkIndex(bootstrapResponse),
+      workItems: runtimeChanged ? [] : state.workItems,
+      sessions: runtimeChanged ? [] : state.sessions,
+      activeWorkId: runtimeChanged ? undefined : state.activeWorkId,
+      activeSessionId: runtimeChanged ? undefined : state.activeSessionId,
+      chat: runtimeChanged ? { messages: [], running: false } : state.chat,
+      statusText: statusFromBootstrap(bootstrapResponse),
+      isSwitchingRuntime: false
+    };
     render();
 
     if (bootstrapResponse.runtime.reachable) {
@@ -80,12 +99,14 @@ async function bootstrap(): Promise<void> {
 }
 
 async function connectGateway(url: string): Promise<void> {
+  const generation = ++connectionGeneration;
   state = { ...state, connection: "reconnecting", statusText: `正在连接 ${runtimeName()}` };
   render();
 
   try {
     gateway = new GatewayClient(url);
     gateway.onEvent((frame) => {
+      if (generation !== connectionGeneration) return;
       if (frame.type === "chat" || frame.event === "chat") {
         const chatEvent = frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame;
         const eventSessionKey = sessionKeyFromEvent(chatEvent);
@@ -126,6 +147,7 @@ async function connectGateway(url: string): Promise<void> {
       }
     });
     await gateway.connect();
+    if (generation !== connectionGeneration) return;
     state = { ...state, connection: "connected", statusText: `${runtimeName()} connected` };
     render();
     await gateway.request("health").catch(() => undefined);
@@ -293,7 +315,8 @@ function applyCachedTitles(sessions: SessionSummary[]): SessionSummary[] {
 
 function readTitleCache(): Record<string, string> {
   try {
-    const raw = window.localStorage.getItem(SESSION_TITLE_CACHE_KEY);
+    const scopedRaw = window.localStorage.getItem(scopedStorageKey(SESSION_TITLE_CACHE_KEY, state.bootstrap));
+    const raw = scopedRaw ?? window.localStorage.getItem(SESSION_TITLE_CACHE_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
   } catch {
@@ -305,15 +328,16 @@ function saveCachedTitle(sessionId: string, title: string): void {
   try {
     const titleCache = readTitleCache();
     titleCache[sessionId] = title;
-    window.localStorage.setItem(SESSION_TITLE_CACHE_KEY, JSON.stringify(titleCache));
+    window.localStorage.setItem(scopedStorageKey(SESSION_TITLE_CACHE_KEY, state.bootstrap), JSON.stringify(titleCache));
   } catch {
     // localStorage may be unavailable in hardened browser contexts; the in-memory title still works.
   }
 }
 
-function readWorkIndex(): WorkIndex {
+function readWorkIndex(bootstrapResponse?: BootstrapResponse): WorkIndex {
   try {
-    const raw = window.localStorage.getItem(WORK_INDEX_CACHE_KEY);
+    const scopedRaw = window.localStorage.getItem(scopedStorageKey(WORK_INDEX_CACHE_KEY, bootstrapResponse));
+    const raw = scopedRaw ?? window.localStorage.getItem(WORK_INDEX_CACHE_KEY);
     return normalizeWorkIndex(raw ? JSON.parse(raw) : undefined);
   } catch {
     return normalizeWorkIndex(undefined);
@@ -322,10 +346,21 @@ function readWorkIndex(): WorkIndex {
 
 function saveWorkIndex(workIndex: WorkIndex): void {
   try {
-    window.localStorage.setItem(WORK_INDEX_CACHE_KEY, JSON.stringify(workIndex));
+    window.localStorage.setItem(scopedStorageKey(WORK_INDEX_CACHE_KEY, state.bootstrap), JSON.stringify(workIndex));
   } catch {
     // The Gateway session still exists; persistence only affects the UI rail projection.
   }
+}
+
+function scopedStorageKey(prefix: string, bootstrapResponse?: BootstrapResponse): string {
+  return `${prefix}:${encodeURIComponent(runtimeStorageScope(bootstrapResponse))}`;
+}
+
+function runtimeStorageScope(bootstrapResponse?: BootstrapResponse): string {
+  const runtime = bootstrapResponse?.runtime;
+  if (!runtime) return "pending";
+  const workspace = runtime.kind === "claude-agent-sdk" ? bootstrapResponse?.runtimeSelection?.claudeSdk.cwd : bootstrapResponse?.gateway.httpUrl;
+  return `${runtime.kind}:${runtime.transport}:${workspace ?? "local"}`;
 }
 
 function projectActiveWork(params: {
@@ -377,7 +412,6 @@ function render(): void {
           ${renderWorkItems()}
         </div>
         ${renderGatewaySessionsPanel()}
-        <button class="settings-row" type="button">本地设置</button>
       </aside>
       <main class="workspace">
         <header class="topbar">
@@ -387,6 +421,7 @@ function render(): void {
           </div>
           <div class="top-actions">
             <span class="runtime-pill ${state.connection}"><i></i>${escapeHtml(labelForConnection(state.connection))}</span>
+            <button class="icon-action" type="button" aria-label="本地设置" title="本地设置" data-action="settings">⚙</button>
             <button type="button" aria-label="重新连接" data-action="reconnect">↻</button>
           </div>
         </header>
@@ -411,6 +446,7 @@ function render(): void {
         </footer>
       </main>
     </div>
+    ${renderSettingsPanel()}
   `;
 
   bindEvents();
@@ -445,6 +481,213 @@ function bindEvents(): void {
   appRoot.querySelector<HTMLButtonElement>("[data-action='reconnect']")?.addEventListener("click", () => void bootstrap());
   appRoot.querySelector<HTMLButtonElement>("[data-action='abort']")?.addEventListener("click", () => void abortRun());
   appRoot.querySelector<HTMLButtonElement>("[data-action='new-work']")?.addEventListener("click", () => void createWork());
+  appRoot.querySelector<HTMLButtonElement>("[data-action='settings']")?.addEventListener("click", () => {
+    state = { ...state, settingsOpen: true };
+    render();
+  });
+  appRoot.querySelector<HTMLButtonElement>("[data-action='close-settings']")?.addEventListener("click", () => {
+    state = { ...state, settingsOpen: false };
+    render();
+  });
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-runtime-kind]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const kind = normalizeRuntimeKind(button.dataset.runtimeKind);
+      if (!kind) return;
+      void selectRuntime(kind);
+    });
+  });
+}
+
+function renderSettingsPanel(): string {
+  if (!state.settingsOpen) return "";
+  const selection = state.bootstrap?.runtimeSelection;
+  const options = selection?.options ?? fallbackRuntimeOptions();
+  const locked = selection?.locked === true;
+  const canSwitch = !locked && !state.chat.running && !state.isSwitchingRuntime;
+  const lockText = locked ? `由 ${selection?.source ?? "env"} 配置锁定` : state.chat.running ? "当前运行结束后可切换" : "可在本地切换";
+  return `
+    <div class="settings-backdrop" role="presentation">
+      <section class="settings-panel" role="dialog" aria-modal="true" aria-label="本地设置">
+        <header class="settings-header">
+          <div>
+            <strong>本地设置</strong>
+            <span>${escapeHtml(lockText)}</span>
+          </div>
+          <button type="button" data-action="close-settings" aria-label="关闭设置">×</button>
+        </header>
+        <div class="settings-section">
+          <div class="settings-section-title">
+            <strong>Runtime</strong>
+            <span>${escapeHtml(runtimeName())} · ${escapeHtml(runtimeTransportLabel())}</span>
+          </div>
+          <div class="runtime-options">
+            ${options.map((option) => renderRuntimeOption(option, canSwitch)).join("")}
+          </div>
+        </div>
+        <div class="settings-section settings-grid">
+          ${renderSettingDetail("状态", labelForConnection(state.connection))}
+          ${renderSettingDetail("版本", state.bootstrap?.runtime.version ?? "未确认")}
+          ${renderSettingDetail("配置来源", selection?.source ?? "default")}
+          ${renderSettingDetail("设置文件", selection?.settingsPath ?? ".runtime/settings.json")}
+          ${renderSettingDetail("Claude cwd", selection?.claudeSdk.cwd ?? "未配置")}
+          ${renderSettingDetail("Claude 权限", selection?.claudeSdk.permissionMode ?? "未配置")}
+          ${renderSettingDetail("Claude 工具", selection?.claudeSdk.allowedTools.length ? selection.claudeSdk.allowedTools.join(", ") : "未限制")}
+          ${renderSettingDetail("Claude 模型", selection?.claudeSdk.model ?? "默认")}
+        </div>
+        ${renderSettingsDiagnostics()}
+      </section>
+    </div>
+  `;
+}
+
+function renderRuntimeOption(option: RuntimeOption, canSwitch: boolean): string {
+  const selected = option.kind === state.bootstrap?.runtime.kind;
+  const disabled = selected || !canSwitch;
+  const status = option.available ? option.version ?? "available" : option.detail ?? "unavailable";
+  return `
+    <button class="runtime-option ${selected ? "selected" : ""}" type="button" data-runtime-kind="${escapeHtml(option.kind)}" ${disabled ? "disabled" : ""}>
+      <span>
+        <strong>${escapeHtml(option.name)}</strong>
+        <em>${escapeHtml(option.transport)}</em>
+      </span>
+      <small>${escapeHtml(status)}</small>
+    </button>
+  `;
+}
+
+function renderSettingDetail(label: string, value: string): string {
+  return `
+    <div class="setting-detail">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function renderSettingsDiagnostics(): string {
+  const diagnostics = state.bootstrap?.diagnostics ?? [];
+  if (!diagnostics.length) return "";
+  return `
+    <div class="settings-section">
+      <div class="settings-section-title">
+        <strong>诊断</strong>
+        <span>${diagnostics.length} item${diagnostics.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="settings-diagnostics">
+        ${diagnostics
+          .map(
+            (item) => `
+              <article>
+                <strong>${escapeHtml(item.message)}</strong>
+                <p>${escapeHtml(item.detail ?? item.code)}</p>
+              </article>
+            `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function fallbackRuntimeOptions(): RuntimeOption[] {
+  const current = state.bootstrap?.runtime;
+  return [
+    {
+      kind: "openclaw",
+      name: "OpenClaw",
+      transport: "gateway-ws",
+      available: current?.kind === "openclaw" ? current.available : false,
+      configured: current?.kind === "openclaw",
+      version: current?.kind === "openclaw" ? current.version : undefined
+    },
+    {
+      kind: "claude-agent-sdk",
+      name: "Claude Agent SDK",
+      transport: "library-sdk",
+      available: current?.kind === "claude-agent-sdk" ? current.available : false,
+      configured: current?.kind === "claude-agent-sdk",
+      version: current?.kind === "claude-agent-sdk" ? current.version : undefined
+    }
+  ];
+}
+
+async function selectRuntime(kind: RuntimeKind): Promise<void> {
+  if (state.chat.running || state.bootstrap?.runtimeSelection?.locked) return;
+  state = { ...state, isSwitchingRuntime: true, statusText: `正在切换到 ${runtimeDisplayName(kind)}` };
+  render();
+
+  const response = await fetch("/api/runtime/select", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runtimeKind: kind })
+  }).catch((error) => {
+    state = { ...state, isSwitchingRuntime: false, statusText: error instanceof Error ? error.message : "Runtime switch failed" };
+    render();
+    return undefined;
+  });
+
+  if (!response) return;
+  if (!response.ok) {
+    const message = await runtimeSwitchError(response);
+    state = { ...state, isSwitchingRuntime: false, statusText: message };
+    render();
+    return;
+  }
+
+  const bootstrapResponse = await readJsonResponse<BootstrapResponse>(
+    response,
+    "当前 We-Claw launcher 不支持 runtime 切换；请重启 We-Claw 后再试。"
+  ).catch((error) => {
+    state = { ...state, isSwitchingRuntime: false, statusText: error instanceof Error ? error.message : "Runtime switch failed" };
+    render();
+    return undefined;
+  });
+  if (!bootstrapResponse) return;
+  disconnectRuntime();
+  state = {
+    ...state,
+    bootstrap: bootstrapResponse,
+    connection: "starting",
+    sessions: [],
+    workIndex: readWorkIndex(bootstrapResponse),
+    workItems: [],
+    activeWorkId: undefined,
+    activeSessionId: undefined,
+    chat: { messages: [], running: false },
+    composerText: "",
+    statusText: `已切换到 ${runtimeDisplayName(kind)}`,
+    isSwitchingRuntime: false
+  };
+  render();
+  void bootstrap();
+}
+
+function disconnectRuntime(): void {
+  connectionGeneration += 1;
+  gateway?.disconnect();
+  gateway = undefined;
+  subscribedSessionKey = undefined;
+  pendingSessionMessageReloadSessionKey = undefined;
+}
+
+async function runtimeSwitchError(response: Response): Promise<string> {
+  const fallback = `Runtime switch failed with ${response.status}`;
+  try {
+    const body = (await response.json()) as { error?: { message?: unknown } };
+    return typeof body.error?.message === "string" ? body.error.message : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function readJsonResponse<T>(response: Response, fallback: string): Promise<T> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) throw new Error(fallback);
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new Error(fallback);
+  }
 }
 
 async function createWork(): Promise<void> {
@@ -686,6 +929,20 @@ function runtimeName(): string {
 
 function runtimeTransportLabel(): string {
   return state.bootstrap?.runtime.transport ?? "runtime";
+}
+
+function runtimeDisplayName(kind: RuntimeKind): string {
+  return {
+    openclaw: "OpenClaw",
+    hermes: "Hermes",
+    "claude-agent-sdk": "Claude Agent SDK",
+    "cli-process": "CLI Process"
+  }[kind];
+}
+
+function normalizeRuntimeKind(value: string | undefined): RuntimeKind | undefined {
+  if (value === "openclaw" || value === "hermes" || value === "claude-agent-sdk" || value === "cli-process") return value;
+  return undefined;
 }
 
 function statusFromBootstrap(bootstrapResponse: BootstrapResponse): string {

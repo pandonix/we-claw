@@ -4,6 +4,7 @@ export type RuntimeKind = "openclaw" | "hermes" | "claude-agent-sdk" | "cli-proc
 export type RuntimeTransport = "gateway-ws" | "stdio-jsonrpc" | "library-sdk" | "cli-process";
 export type RuntimeOwnership = "external" | "managed" | "none";
 export type RuntimeProcessState = "not-started" | "starting" | "running" | "external" | "failed";
+export type RuntimeSelectionSource = "env" | "settings" | "default";
 
 export interface RuntimeCapabilities {
   sessions: boolean;
@@ -31,6 +32,31 @@ export interface RuntimeBootstrap {
   ownership: RuntimeOwnership;
   processState: RuntimeProcessState;
   error?: string;
+}
+
+export interface RuntimeOption {
+  kind: RuntimeKind;
+  name: string;
+  transport: RuntimeTransport;
+  available: boolean;
+  configured: boolean;
+  version?: string;
+  detail?: string;
+}
+
+export interface RuntimeSelection {
+  current: RuntimeKind;
+  configured: RuntimeKind;
+  source: RuntimeSelectionSource;
+  locked: boolean;
+  settingsPath: string;
+  options: RuntimeOption[];
+  claudeSdk: {
+    cwd: string;
+    permissionMode: string;
+    allowedTools: string[];
+    model?: string;
+  };
 }
 
 export interface BootstrapDiagnostics {
@@ -64,6 +90,7 @@ export interface BootstrapResponse {
     error?: string;
   };
   runtime: RuntimeBootstrap;
+  runtimeSelection?: RuntimeSelection;
   diagnostics: BootstrapDiagnostics[];
 }
 

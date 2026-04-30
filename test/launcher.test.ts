@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createLauncherConfig, isNodeCompatible } from "../src/launcher/config";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createLauncherConfig, isNodeCompatible, readLauncherSettings, runtimeSettingsPath, writeLauncherSettings } from "../src/launcher/config";
 import { redact } from "../src/launcher/redact";
 
 describe("launcher config", () => {
@@ -21,11 +24,43 @@ describe("launcher config", () => {
       httpPort: 4180,
       manageGateway: false,
       runtimeKind: "claude-agent-sdk",
+      runtimeKindSource: "env",
+      runtimeKindLocked: true,
       claudeSdkCwd: "/tmp/project",
       claudeSdkPermissionMode: "plan",
       claudeSdkAllowedTools: ["Read", "Glob", "Grep"],
       claudeSdkModel: "claude-sonnet-4-6"
     });
+  });
+
+  it("uses persisted runtime settings when env does not lock runtime", () => {
+    const config = createLauncherConfig({} as NodeJS.ProcessEnv, { runtimeKind: "claude-agent-sdk" });
+    expect(config).toMatchObject({
+      runtimeKind: "claude-agent-sdk",
+      runtimeKindSource: "settings",
+      runtimeKindLocked: false
+    });
+  });
+
+  it("falls back to OpenClaw when neither env nor settings select a runtime", () => {
+    const config = createLauncherConfig({} as NodeJS.ProcessEnv, {});
+    expect(config).toMatchObject({
+      runtimeKind: "openclaw",
+      runtimeKindSource: "default",
+      runtimeKindLocked: false
+    });
+  });
+
+  it("persists runtime settings in the local runtime directory", () => {
+    const directory = mkdtempSync(join(tmpdir(), "we-claw-settings-"));
+    const settingsPath = runtimeSettingsPath(directory);
+    try {
+      writeLauncherSettings({ runtimeKind: "claude-agent-sdk" }, settingsPath);
+      expect(readLauncherSettings(settingsPath)).toEqual({ runtimeKind: "claude-agent-sdk" });
+      expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({ runtimeKind: "claude-agent-sdk" });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("checks OpenClaw's minimum Node requirement", () => {
