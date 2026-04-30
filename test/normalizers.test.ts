@@ -216,6 +216,14 @@ describe("normalizers", () => {
     expect(fallback.notices?.map((notice) => notice.text)).toEqual(["Run started", "Compaction completed", "Model fallback: openai/slow -> openai/fast (timeout)"]);
   });
 
+  it("turns Hermes status and waiting lifecycle events into runtime notices", () => {
+    const status = reduceAgentEvent({ messages: [], running: false }, { stream: "lifecycle", ts: 1, data: { phase: "status", text: "Thinking" } });
+    const waiting = reduceAgentEvent(status, { stream: "lifecycle", ts: 2, data: { phase: "waiting", text: "Approval required" } });
+
+    expect(waiting.running).toBe(true);
+    expect(waiting.notices?.map((notice) => notice.text)).toEqual(["Thinking", "Approval required"]);
+  });
+
   it("ignores malformed tool events without tool call ids", () => {
     expect(normalizeToolEvent({ stream: "tool", data: { phase: "start", name: "exec" } })).toBeUndefined();
   });

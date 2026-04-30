@@ -9,6 +9,7 @@ import type { Options, Query } from "@anthropic-ai/claude-agent-sdk";
 import type { ConversationNotice, GatewayFrame, RuntimeBootstrap, RuntimeCapabilities, RuntimeKind, RuntimeTransport, SessionSummary, ToolBlock, ToolBlockStatus, TranscriptMessage } from "../shared/types";
 import type { LauncherContext } from "./bootstrap.js";
 import { bridgeGatewayWebSocket } from "./gateway-bridge.js";
+import { hermesCapabilities, HermesRuntime } from "./hermes-runtime.js";
 import { redact } from "./redact.js";
 
 const RUNTIME_BRIDGE_PATH = "/api/runtime/ws";
@@ -57,6 +58,7 @@ export function runtimeBridgePath(): string {
 
 export function installRuntimeBridge(server: UpgradeServer, context: LauncherContext): void {
   const claudeRuntime = new ClaudeAgentSdkRuntime(context);
+  const hermesRuntime = new HermesRuntime(context);
   server.on("upgrade", (request, socket, head) => {
     const pathname = safePathname(request.url);
     if (pathname !== RUNTIME_BRIDGE_PATH) return;
@@ -64,7 +66,7 @@ export function installRuntimeBridge(server: UpgradeServer, context: LauncherCon
       void bridgeGatewayWebSocket(request, socket, head, context);
       return;
     }
-    void bridgeLocalRuntimeWebSocket(request, socket, head, context, claudeRuntime);
+    void bridgeLocalRuntimeWebSocket(request, socket, head, context, claudeRuntime, hermesRuntime);
   });
 }
 
@@ -106,6 +108,23 @@ export function runtimeBootstrap(context: LauncherContext, gateway: RuntimeBoots
       ownership: "managed",
       processState: version ? "running" : "failed",
       error: version ? undefined : "Claude Agent SDK package is not installed."
+    };
+  }
+
+  if (kind === "hermes") {
+    const configured = Boolean(context.config.hermesRoot);
+    return {
+      kind,
+      transport: "stdio-jsonrpc",
+      name: "Hermes",
+      available: configured,
+      bridgePath: RUNTIME_BRIDGE_PATH,
+      capabilities: hermesCapabilities(),
+      reachable: configured,
+      ready: configured,
+      ownership: configured ? "managed" : "none",
+      processState: configured ? "not-started" : "failed",
+      error: configured ? undefined : "Set WE_CLAW_HERMES_ROOT to the local hermes-agent checkout."
     };
   }
 
@@ -172,7 +191,8 @@ async function bridgeLocalRuntimeWebSocket(
   socket: Duplex,
   head: Buffer,
   context: LauncherContext,
-  claudeRuntime: ClaudeAgentSdkRuntime
+  claudeRuntime: ClaudeAgentSdkRuntime,
+  hermesRuntime: HermesRuntime
 ): Promise<void> {
   if (request.socket.remoteAddress && !isLoopbackAddress(request.socket.remoteAddress)) {
     socket.destroy();
@@ -205,17 +225,30 @@ async function bridgeLocalRuntimeWebSocket(
         continue;
       }
       if (parsed.opcode !== 1) continue;
-      void handleRuntimeFrame(parsed.payload.toString("utf8"), socket, context, claudeRuntime, emit);
+      void handleRuntimeFrame(parsed.payload.toString("utf8"), socket, context, claudeRuntime, hermesRuntime, emit);
     }
   });
-  socket.on("close", () => claudeRuntime.unsubscribeAll(emit));
+  socket.on("close", () => {
+    claudeRuntime.unsubscribeAll(emit);
+    hermesRuntime.unsubscribeAll(emit);
+    if (runtimeKind(context) === "hermes") hermesRuntime.dispose();
+  });
   socket.on("error", () => {
     claudeRuntime.unsubscribeAll(emit);
+    hermesRuntime.unsubscribeAll(emit);
+    if (runtimeKind(context) === "hermes") hermesRuntime.dispose();
     socket.destroy();
   });
 }
 
-async function handleRuntimeFrame(frameText: string, socket: Duplex, context: LauncherContext, claudeRuntime: ClaudeAgentSdkRuntime, emit: RuntimeEventEmitter): Promise<void> {
+async function handleRuntimeFrame(
+  frameText: string,
+  socket: Duplex,
+  context: LauncherContext,
+  claudeRuntime: ClaudeAgentSdkRuntime,
+  hermesRuntime: HermesRuntime,
+  emit: RuntimeEventEmitter
+): Promise<void> {
   let frame: GatewayFrame;
   try {
     frame = JSON.parse(frameText) as GatewayFrame;
@@ -226,7 +259,7 @@ async function handleRuntimeFrame(frameText: string, socket: Duplex, context: La
   if (frame.type !== "req" || !frame.method) return;
 
   try {
-    const payload = await dispatchRuntimeRequest(frame.method, frame.params, context, claudeRuntime, emit);
+    const payload = await dispatchRuntimeRequest(frame.method, frame.params, context, claudeRuntime, hermesRuntime, emit);
     sendTextFrame(socket, JSON.stringify({ type: "res", id: frame.id, ok: true, payload }));
   } catch (error) {
     sendTextFrame(
@@ -246,13 +279,24 @@ async function dispatchRuntimeRequest(
   params: unknown,
   context: LauncherContext,
   claudeRuntime: ClaudeAgentSdkRuntime,
+  hermesRuntime: HermesRuntime,
   emit: RuntimeEventEmitter
 ): Promise<unknown> {
   if (method === "connect") return { methods: runtimeMethods(runtimeKind(context)), runtime: runtimeBootstrap(context, gatewayRuntimePlaceholder()) };
   if (method === "health") return { ready: true, runtime: runtimeKind(context) };
-  if (method === "sessions.subscribe") return claudeRuntime.subscribeSessions(emit);
-  if (method === "sessions.messages.subscribe") return claudeRuntime.subscribeSessionMessages(sessionKeyFromParams(params), emit);
-  if (method === "sessions.messages.unsubscribe") return claudeRuntime.unsubscribeSessionMessages(sessionKeyFromParams(params), emit);
+  const activeRuntime = runtimeKind(context) === "hermes" ? hermesRuntime : claudeRuntime;
+  if (method === "sessions.subscribe") return activeRuntime.subscribeSessions(emit);
+  if (method === "sessions.messages.subscribe") return activeRuntime.subscribeSessionMessages(sessionKeyFromParams(params), emit);
+  if (method === "sessions.messages.unsubscribe") return activeRuntime.unsubscribeSessionMessages(sessionKeyFromParams(params), emit);
+
+  if (runtimeKind(context) === "hermes") {
+    if (method === "sessions.list") return { sessions: await hermesRuntime.listSessions() };
+    if (method === "sessions.create") return hermesRuntime.createSession(emit);
+    if (method === "chat.history") return hermesRuntime.loadHistory(sessionKeyFromParams(params));
+    if (method === "chat.send") return hermesRuntime.sendPrompt(sessionKeyFromParams(params), messageFromParams(params), emit);
+    if (method === "chat.abort") return hermesRuntime.abort(sessionKeyFromParams(params));
+    throw new Error(`Unsupported runtime method: ${method}`);
+  }
 
   if (runtimeKind(context) !== "claude-agent-sdk") {
     throw new Error(`${runtimeName(runtimeKind(context))} runtime bridge is not implemented.`);

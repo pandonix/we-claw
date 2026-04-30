@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { RuntimeKind } from "../shared/types";
 
+const DEFAULT_HERMES_STARTUP_TIMEOUT_MS = 15000;
+
 export interface LauncherSettings {
   runtimeKind?: RuntimeKind;
 }
@@ -20,6 +22,10 @@ export interface LauncherConfig {
   claudeSdkPermissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto";
   claudeSdkAllowedTools: string[];
   claudeSdkModel?: string;
+  hermesPython: string;
+  hermesRoot?: string;
+  hermesCwd: string;
+  hermesStartupTimeoutMs: number;
 }
 
 export function createLauncherConfig(env: NodeJS.ProcessEnv = process.env, settings = readLauncherSettings()): LauncherConfig {
@@ -39,7 +45,11 @@ export function createLauncherConfig(env: NodeJS.ProcessEnv = process.env, setti
     claudeSdkCwd: env.WE_CLAW_CLAUDE_SDK_CWD || process.cwd(),
     claudeSdkPermissionMode: normalizePermissionMode(env.WE_CLAW_CLAUDE_SDK_PERMISSION_MODE),
     claudeSdkAllowedTools: parseList(env.WE_CLAW_CLAUDE_SDK_ALLOWED_TOOLS),
-    claudeSdkModel: normalizeOptionalText(env.WE_CLAW_CLAUDE_SDK_MODEL)
+    claudeSdkModel: normalizeOptionalText(env.WE_CLAW_CLAUDE_SDK_MODEL),
+    hermesPython: normalizeOptionalText(env.WE_CLAW_HERMES_PYTHON) ?? "python3",
+    hermesRoot: normalizeOptionalText(env.WE_CLAW_HERMES_ROOT),
+    hermesCwd: normalizeOptionalText(env.WE_CLAW_HERMES_CWD) ?? normalizeOptionalText(env.WE_CLAW_HERMES_ROOT) ?? process.cwd(),
+    hermesStartupTimeoutMs: normalizePositiveInteger(env.WE_CLAW_HERMES_STARTUP_TIMEOUT_MS, DEFAULT_HERMES_STARTUP_TIMEOUT_MS)
   };
 }
 
@@ -89,4 +99,10 @@ function parseList(value: string | undefined): string[] {
 function normalizeOptionalText(value: string | undefined): string | undefined {
   const text = value?.trim();
   return text || undefined;
+}
+
+function normalizePositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
 }

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { delimiter } from "node:path";
 import http from "node:http";
 import { promisify } from "node:util";
 import type { BootstrapDiagnostics, BootstrapResponse, RuntimeKind, RuntimeOption, RuntimeSelection, RuntimeTransport } from "../shared/types";
@@ -35,6 +36,7 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
   }
 
   const openclaw = await detectOpenClaw(context.config.openclawExecutable);
+  const hermes = await detectHermes(context.config);
   if (!openclaw.available) {
     diagnostics.push({
       code: "openclaw.missing",
@@ -59,8 +61,15 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
       detail: gatewayAuth.error
     });
   }
+  if (context.config.runtimeKind === "hermes" && !hermes.available) {
+    diagnostics.push({
+      code: hermes.code,
+      message: hermes.message,
+      detail: hermes.error
+    });
+  }
 
-  const runtime = runtimeBootstrap(
+  let runtime = runtimeBootstrap(
     context,
     {
       kind: "openclaw",
@@ -89,6 +98,16 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
     },
     openclaw.version
   );
+  if (context.config.runtimeKind === "hermes" && !hermes.available) {
+    runtime = {
+      ...runtime,
+      available: false,
+      reachable: false,
+      ready: false,
+      processState: "failed",
+      error: hermes.error
+    };
+  }
 
   return {
     node: {
@@ -110,7 +129,7 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
       error: context.gatewayError ?? gateway.error
     },
     runtime,
-    runtimeSelection: createRuntimeSelection(context, openclaw, gateway.error),
+    runtimeSelection: createRuntimeSelection(context, openclaw, gateway.error, hermes),
     diagnostics
   };
 }
@@ -118,7 +137,8 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
 export function createRuntimeSelection(
   context: LauncherContext,
   openclaw: BootstrapResponse["openclaw"],
-  gatewayError?: string
+  gatewayError?: string,
+  hermes = hermesStatusFromConfig(context.config)
 ): RuntimeSelection {
   const claudeVersion = detectClaudeAgentSdkVersion();
   const current = context.config.runtimeKind;
@@ -142,6 +162,13 @@ export function createRuntimeSelection(
         version: claudeVersion,
         available: Boolean(claudeVersion),
         detail: claudeVersion ? undefined : "Claude Agent SDK package is not installed."
+      }),
+      runtimeOption({
+        kind: "hermes",
+        configured: current === "hermes",
+        available: hermes.available,
+        version: hermes.version,
+        detail: hermes.available ? hermes.detail : hermes.error
       })
     ],
     claudeSdk: {
@@ -149,6 +176,12 @@ export function createRuntimeSelection(
       permissionMode: context.config.claudeSdkPermissionMode,
       allowedTools: context.config.claudeSdkAllowedTools,
       model: context.config.claudeSdkModel
+    },
+    hermes: {
+      configured: Boolean(context.config.hermesRoot),
+      root: context.config.hermesRoot,
+      cwd: context.config.hermesCwd,
+      startupTimeoutMs: context.config.hermesStartupTimeoutMs
     }
   };
 }
@@ -202,6 +235,63 @@ export async function detectOpenClaw(executable: string): Promise<BootstrapRespo
       error: error instanceof Error ? redact(error.message) : String(error)
     };
   }
+}
+
+interface HermesDetection {
+  available: boolean;
+  code: string;
+  message: string;
+  detail?: string;
+  error?: string;
+  version?: string;
+}
+
+export async function detectHermes(config: LauncherConfig): Promise<HermesDetection> {
+  if (!config.hermesRoot) return hermesStatusFromConfig(config);
+  try {
+    const pythonPath = process.env.PYTHONPATH?.trim();
+    const env = {
+      ...process.env,
+      PYTHONPATH: pythonPath ? `${config.hermesRoot}${delimiter}${pythonPath}` : config.hermesRoot
+    };
+    const { stdout, stderr } = await execFileAsync(
+      config.hermesPython,
+      ["-c", "import tui_gateway.entry; print('tui_gateway.entry')"],
+      { cwd: config.hermesCwd, env, timeout: config.hermesStartupTimeoutMs }
+    );
+    return {
+      available: true,
+      code: "hermes.available",
+      message: "Hermes TUI Gateway entry is available.",
+      detail: `Hermes root: ${config.hermesRoot}`,
+      version: redact((stdout || stderr).trim()) || undefined
+    };
+  } catch (error) {
+    const message = error instanceof Error ? redact(error.message) : redact(String(error));
+    return {
+      available: false,
+      code: "hermes.entry-unavailable",
+      message: "Hermes TUI Gateway entry could not be imported.",
+      error: message
+    };
+  }
+}
+
+function hermesStatusFromConfig(config: LauncherConfig): HermesDetection {
+  if (!config.hermesRoot) {
+    return {
+      available: false,
+      code: "hermes.root-missing",
+      message: "Hermes root is not configured.",
+      error: "Set WE_CLAW_HERMES_ROOT to the local hermes-agent checkout before selecting WE_CLAW_RUNTIME=hermes."
+    };
+  }
+  return {
+    available: true,
+    code: "hermes.configured",
+    message: "Hermes runtime is configured.",
+    detail: `Hermes root: ${config.hermesRoot}`
+  };
 }
 
 export async function probeGateway(host: string, port: number): Promise<{ reachable: boolean; ready: boolean; error?: string }> {

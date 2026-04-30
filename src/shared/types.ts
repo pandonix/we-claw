@@ -57,6 +57,12 @@ export interface RuntimeSelection {
     allowedTools: string[];
     model?: string;
   };
+  hermes?: {
+    configured: boolean;
+    root?: string;
+    cwd: string;
+    startupTimeoutMs: number;
+  };
 }
 
 export interface BootstrapDiagnostics {

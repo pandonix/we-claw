@@ -367,7 +367,12 @@ function scopedStorageKey(prefix: string, bootstrapResponse?: BootstrapResponse)
 function runtimeStorageScope(bootstrapResponse?: BootstrapResponse): string {
   const runtime = bootstrapResponse?.runtime;
   if (!runtime) return "pending";
-  const workspace = runtime.kind === "claude-agent-sdk" ? bootstrapResponse?.runtimeSelection?.claudeSdk.cwd : bootstrapResponse?.gateway.httpUrl;
+  const workspace =
+    runtime.kind === "claude-agent-sdk"
+      ? bootstrapResponse?.runtimeSelection?.claudeSdk.cwd
+      : runtime.kind === "hermes"
+        ? bootstrapResponse?.runtimeSelection?.hermes?.cwd
+        : bootstrapResponse?.gateway.httpUrl;
   return `${runtime.kind}:${runtime.transport}:${workspace ?? "local"}`;
 }
 
@@ -541,6 +546,9 @@ function renderSettingsPanel(): string {
           ${renderSettingDetail("Claude 权限", selection?.claudeSdk.permissionMode ?? "未配置")}
           ${renderSettingDetail("Claude 工具", selection?.claudeSdk.allowedTools.length ? selection.claudeSdk.allowedTools.join(", ") : "未限制")}
           ${renderSettingDetail("Claude 模型", selection?.claudeSdk.model ?? "默认")}
+          ${renderSettingDetail("Hermes root", selection?.hermes?.root ?? "未配置")}
+          ${renderSettingDetail("Hermes cwd", selection?.hermes?.cwd ?? "未配置")}
+          ${renderSettingDetail("Hermes 启动超时", selection?.hermes ? `${selection.hermes.startupTimeoutMs}ms` : "未配置")}
         </div>
         ${renderSettingsDiagnostics()}
       </section>
@@ -615,6 +623,14 @@ function fallbackRuntimeOptions(): RuntimeOption[] {
       available: current?.kind === "claude-agent-sdk" ? current.available : false,
       configured: current?.kind === "claude-agent-sdk",
       version: current?.kind === "claude-agent-sdk" ? current.version : undefined
+    },
+    {
+      kind: "hermes",
+      name: "Hermes",
+      transport: "stdio-jsonrpc",
+      available: current?.kind === "hermes" ? current.available : false,
+      configured: current?.kind === "hermes",
+      version: current?.kind === "hermes" ? current.version : undefined
     }
   ];
 }

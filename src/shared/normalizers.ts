@@ -247,6 +247,10 @@ function reduceLifecycleEvent(state: ChatState, event: Record<string, unknown>):
     const text = asString(data.error) ?? asString(data.errorMessage) ?? "Run failed";
     return addNotice({ ...state, running: false, error: text }, noticeFromText(event, "error", text));
   }
+  if (phase === "status" || phase === "waiting") {
+    const text = asString(data.text) ?? asString(data.message) ?? (phase === "waiting" ? "Runtime is waiting for input" : "Runtime status updated");
+    return addNotice(phase === "waiting" ? { ...state, running: true } : state, noticeFromText(event, "runtime", text));
+  }
   if (phase === "fallback" || phase === "fallback_cleared") {
     return addNotice(state, noticeFromFallback(event));
   }
