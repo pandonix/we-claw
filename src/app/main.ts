@@ -1,6 +1,6 @@
 import { GatewayClient } from "../gateway/client";
-import { normalizeHistory, normalizeSessions, reduceChatEvent, titleFromHistory, UNTITLED_SESSION } from "../shared/normalizers";
-import type { BootstrapResponse, ChatState, ConnectionState, SessionSummary, TranscriptMessage } from "../shared/types";
+import { normalizeHistory, normalizeSessions, reduceAgentEvent, reduceChatEvent, reduceToolEvent, titleFromHistory, UNTITLED_SESSION } from "../shared/normalizers";
+import type { BootstrapResponse, ChatState, ConnectionState, ConversationNotice, SessionSummary, ToolBlock, TranscriptMessage } from "../shared/types";
 import "./styles.css";
 
 const SESSION_TITLE_CACHE_KEY = "we-claw.sessionTitleCache.v1";
@@ -23,6 +23,8 @@ const appRoot = maybeRoot;
 
 let gateway: GatewayClient | undefined;
 let historyRequestSeq = 0;
+let pendingSessionMessageReloadSessionKey: string | undefined;
+let subscribedSessionKey: string | undefined;
 let state: AppState = {
   connection: "starting",
   sessions: [],
@@ -76,19 +78,44 @@ async function connectGateway(url: string): Promise<void> {
         if (eventSessionKey && state.activeSessionId && eventSessionKey !== state.activeSessionId) return;
         state = { ...state, chat: reduceChatEvent(state.chat, chatEvent), statusText: statusFromChatEvent(chatEvent, state.statusText) };
         render();
+        replayDeferredSessionMessageReload(chatEvent);
+        return;
+      }
+      if (frame.event === "agent") {
+        const agentEvent = frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame;
+        const eventSessionKey = sessionKeyFromEvent(agentEvent);
+        if (eventSessionKey && state.activeSessionId && eventSessionKey !== state.activeSessionId) return;
+        state = { ...state, chat: reduceAgentEvent(state.chat, agentEvent), statusText: statusFromAgentEvent(agentEvent, state.statusText) };
+        render();
+        return;
+      }
+      if (frame.event === "session.tool") {
+        const toolEvent = frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame;
+        const eventSessionKey = sessionKeyFromEvent(toolEvent);
+        if (eventSessionKey && state.activeSessionId && eventSessionKey !== state.activeSessionId) return;
+        state = { ...state, chat: reduceToolEvent(state.chat, toolEvent), statusText: statusFromAgentEvent(toolEvent, state.statusText) };
+        render();
+        return;
+      }
+      if (frame.event === "session.message") {
+        handleSessionMessageEvent(frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame);
+        return;
       }
       if (frame.type === "sessions.changed" || frame.event === "sessions.changed") {
         void loadSessions();
+        return;
       }
-      if (frame.type === "shutdown") {
+      if (frame.type === "shutdown" || frame.event === "shutdown") {
         state = { ...state, connection: "disconnected", statusText: "Gateway 已断开" };
         render();
+        return;
       }
     });
     await gateway.connect();
     state = { ...state, connection: "connected", statusText: "Gateway connected" };
     render();
     await gateway.request("health").catch(() => undefined);
+    await gateway.request("sessions.subscribe").catch(() => undefined);
     await loadSessions({ loadHistoryForActive: true });
   } catch (error) {
     state = {
@@ -135,10 +162,13 @@ async function loadSessions(options: { loadHistoryForActive?: boolean; showRefre
   }
 }
 
-async function loadHistory(sessionId: string): Promise<void> {
+async function loadHistory(sessionId: string, options: { preserveRuntimeBlocks?: boolean } = {}): Promise<void> {
   if (!gateway) return;
   const requestSeq = ++historyRequestSeq;
-  state = { ...state, chat: { messages: [], running: false }, statusText: "正在加载会话历史" };
+  await subscribeSessionMessages(sessionId);
+  const preservedToolBlocks = options.preserveRuntimeBlocks ? state.chat.toolBlocks : undefined;
+  const preservedNotices = options.preserveRuntimeBlocks ? state.chat.notices : undefined;
+  state = { ...state, chat: { messages: [], toolBlocks: preservedToolBlocks, notices: preservedNotices, running: false }, statusText: "正在加载会话历史" };
   render();
   const history = await gateway.request("chat.history", { sessionKey: sessionId }).catch((error) => {
     if (requestSeq === historyRequestSeq && state.activeSessionId === sessionId) {
@@ -149,7 +179,17 @@ async function loadHistory(sessionId: string): Promise<void> {
   });
   if (requestSeq !== historyRequestSeq || state.activeSessionId !== sessionId) return;
   const messages = normalizeHistory(history);
-  state = { ...state, sessions: applyHistoryTitle(sessionId, messages), chat: { messages, running: false }, statusText: "会话历史已加载" };
+  state = {
+    ...state,
+    sessions: applyHistoryTitle(sessionId, messages),
+    chat: {
+      messages,
+      toolBlocks: options.preserveRuntimeBlocks ? state.chat.toolBlocks : undefined,
+      notices: options.preserveRuntimeBlocks ? state.chat.notices : undefined,
+      running: false
+    },
+    statusText: "会话历史已加载"
+  };
   render();
 }
 
@@ -277,6 +317,7 @@ function render(): void {
         <section class="conversation" data-testid="conversation" aria-label="会话内容">
           ${renderDiagnostics()}
           ${state.chat.messages.map(renderMessage).join("")}
+          ${renderRuntimeBlocks()}
           ${state.chat.running ? `<article class="run-row"><span></span><p>OpenClaw 正在处理当前请求</p></article>` : ""}
           ${state.chat.error ? `<article class="inline-error"><strong>运行失败</strong><p>${escapeHtml(state.chat.error)}</p></article>` : ""}
         </section>
@@ -415,6 +456,42 @@ function renderMessage(message: TranscriptMessage): string {
   `;
 }
 
+function renderRuntimeBlocks(): string {
+  const notices = state.chat.notices ?? [];
+  const tools = state.chat.toolBlocks ?? [];
+  return [...notices.map(renderNotice), ...tools.map(renderToolBlock)].join("");
+}
+
+function renderNotice(notice: ConversationNotice): string {
+  return `
+    <article class="runtime-notice ${notice.kind}" data-notice-id="${escapeHtml(notice.id)}">
+      <span>${escapeHtml(noticeLabel(notice.kind))}</span>
+      <p>${escapeHtml(notice.text)}</p>
+    </article>
+  `;
+}
+
+function renderToolBlock(tool: ToolBlock): string {
+  const output = tool.output?.trim()
+    ? `<details><summary>输出</summary><pre>${escapeHtml(tool.output)}</pre></details>`
+    : "";
+  const input = tool.input?.trim()
+    ? `<details><summary>输入</summary><pre>${escapeHtml(tool.input)}</pre></details>`
+    : "";
+  return `
+    <article class="tool-row ${tool.status}" data-tool-call-id="${escapeHtml(tool.toolCallId)}">
+      <div class="tool-row-main">
+        <span class="tool-status-dot ${tool.status}"></span>
+        <strong>${escapeHtml(tool.name)}</strong>
+        <em>${escapeHtml(toolStatusLabel(tool.status))}</em>
+      </div>
+      <p>${escapeHtml(tool.summary)}</p>
+      ${input}
+      ${output}
+    </article>
+  `;
+}
+
 function canSubmit(): boolean {
   if (state.chat.running) return state.connection === "connected";
   return state.connection === "connected";
@@ -484,9 +561,78 @@ function statusFromChatEvent(event: unknown, fallback: string): string {
   return fallback;
 }
 
+function statusFromAgentEvent(event: unknown, fallback: string): string {
+  const record = event && typeof event === "object" ? (event as Record<string, unknown>) : {};
+  const stream = typeof record.stream === "string" ? record.stream : undefined;
+  const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : record;
+  if (stream === "tool" || typeof data.toolCallId === "string") {
+    const name = typeof data.name === "string" ? data.name : "tool";
+    const phase = typeof data.phase === "string" ? data.phase : "update";
+    if (phase === "result") return `${name} 已完成`;
+    if (phase === "start") return `${name} 正在运行`;
+    return `${name} 已更新`;
+  }
+  if (stream === "lifecycle" && data.phase === "end") return "OpenClaw run 已完成";
+  if (stream === "lifecycle" && data.phase === "error") return "OpenClaw run 失败";
+  return fallback;
+}
+
 function sessionKeyFromEvent(event: unknown): string | undefined {
   const record = event && typeof event === "object" ? (event as Record<string, unknown>) : {};
   return typeof record.sessionKey === "string" && record.sessionKey.trim() ? record.sessionKey.trim() : undefined;
+}
+
+function handleSessionMessageEvent(event: unknown): void {
+  const sessionKey = sessionKeyFromEvent(event);
+  void loadSessions();
+  if (!sessionKey || sessionKey !== state.activeSessionId) return;
+  if (state.chat.running) {
+    pendingSessionMessageReloadSessionKey = sessionKey;
+    return;
+  }
+  pendingSessionMessageReloadSessionKey = undefined;
+  void loadHistory(sessionKey);
+}
+
+async function subscribeSessionMessages(sessionKey: string): Promise<void> {
+  if (!gateway || subscribedSessionKey === sessionKey) return;
+  const previous = subscribedSessionKey;
+  if (previous) {
+    await gateway.request("sessions.messages.unsubscribe", { key: previous }).catch(() => undefined);
+  }
+  await gateway
+    .request("sessions.messages.subscribe", { key: sessionKey })
+    .then(() => {
+      subscribedSessionKey = sessionKey;
+    })
+    .catch(() => undefined);
+}
+
+function replayDeferredSessionMessageReload(chatEvent: unknown): void {
+  const sessionKey = sessionKeyFromEvent(chatEvent);
+  const record = chatEvent && typeof chatEvent === "object" ? (chatEvent as Record<string, unknown>) : {};
+  if (!sessionKey || sessionKey !== pendingSessionMessageReloadSessionKey || sessionKey !== state.activeSessionId) return;
+  if (record.state !== "final" && record.state !== "error" && record.state !== "aborted") return;
+  pendingSessionMessageReloadSessionKey = undefined;
+  void loadHistory(sessionKey, { preserveRuntimeBlocks: true });
+}
+
+function toolStatusLabel(status: ToolBlock["status"]): string {
+  return {
+    running: "running",
+    updated: "updated",
+    completed: "completed",
+    error: "error"
+  }[status];
+}
+
+function noticeLabel(kind: ConversationNotice["kind"]): string {
+  return {
+    runtime: "run",
+    compaction: "compaction",
+    fallback: "model",
+    error: "error"
+  }[kind];
 }
 
 function formatRelative(value?: string): string {

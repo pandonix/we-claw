@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeHistory, normalizeSessions, reduceChatEvent, titleFromHistory, UNTITLED_SESSION } from "../src/shared/normalizers";
+import { normalizeHistory, normalizeSessions, normalizeToolEvent, reduceAgentEvent, reduceChatEvent, reduceToolEvent, titleFromHistory, UNTITLED_SESSION } from "../src/shared/normalizers";
 
 describe("normalizers", () => {
   it("normalizes session rows from Gateway-shaped payloads", () => {
@@ -90,12 +90,106 @@ describe("normalizers", () => {
     expect(next).toEqual({ messages: [], running: true, error: undefined });
   });
 
+  it("does not append unsupported assistant rows for terminal chat events without messages", () => {
+    const streaming = reduceChatEvent({ messages: [], running: false }, { state: "delta", message: { role: "assistant", content: "partial" } });
+    const final = reduceChatEvent(streaming, { runId: "run-1", sessionKey: "main", state: "final" });
+    expect(final.running).toBe(false);
+    expect(final.messages).toHaveLength(1);
+    expect(final.messages[0]).toMatchObject({ role: "assistant", text: "partial", status: "final" });
+  });
+
   it("replaces the streaming assistant row with the final OpenClaw event", () => {
     const streaming = reduceChatEvent({ messages: [], running: false }, { state: "delta", message: { role: "assistant", content: "hel" } });
     const final = reduceChatEvent(streaming, { state: "final", message: { role: "assistant", content: "hello" } });
     expect(final.running).toBe(false);
     expect(final.messages).toHaveLength(1);
     expect(final.messages[0]).toMatchObject({ role: "assistant", text: "hello", status: "final" });
+  });
+
+  it("normalizes OpenClaw agent tool lifecycle events into one compact tool block", () => {
+    const started = reduceAgentEvent(
+      { messages: [], running: true },
+      {
+        runId: "engine-run-1",
+        seq: 1,
+        stream: "tool",
+        ts: 100,
+        sessionKey: "agent:main:main",
+        data: {
+          phase: "start",
+          name: "exec",
+          toolCallId: "tool-1",
+          args: { command: "echo hi" }
+        }
+      }
+    );
+    const completed = reduceAgentEvent(started, {
+      runId: "engine-run-1",
+      seq: 2,
+      stream: "tool",
+      ts: 120,
+      sessionKey: "agent:main:main",
+      data: {
+        phase: "result",
+        name: "exec",
+        toolCallId: "tool-1",
+        result: { text: "hi" }
+      }
+    });
+
+    expect(completed.toolBlocks).toHaveLength(1);
+    expect(completed.toolBlocks?.[0]).toMatchObject({
+      toolCallId: "tool-1",
+      name: "exec",
+      status: "completed",
+      input: '{\n  "command": "echo hi"\n}',
+      output: "hi",
+      summary: "hi"
+    });
+  });
+
+  it("normalizes session.tool payloads with the same tool reducer", () => {
+    const state = reduceToolEvent(
+      { messages: [], running: false },
+      {
+        runId: "run-session-tool",
+        stream: "tool",
+        ts: 1234,
+        sessionKey: "agent:main:main",
+        data: {
+          phase: "result",
+          name: "fetch",
+          toolCallId: "tool-session-1",
+          result: { content: [{ type: "text", text: "ok" }] }
+        }
+      }
+    );
+
+    expect(state.toolBlocks).toHaveLength(1);
+    expect(state.toolBlocks?.[0]).toMatchObject({
+      toolCallId: "tool-session-1",
+      name: "fetch",
+      output: "ok",
+      status: "completed"
+    });
+  });
+
+  it("turns lifecycle, compaction, and fallback agent events into notices", () => {
+    const lifecycle = reduceAgentEvent({ messages: [], running: false }, { runId: "r1", stream: "lifecycle", ts: 1, data: { phase: "start" } });
+    const compaction = reduceAgentEvent(lifecycle, { runId: "r1", stream: "compaction", ts: 2, data: { phase: "end", completed: true } });
+    const fallback = reduceAgentEvent(compaction, {
+      runId: "r1",
+      stream: "fallback",
+      ts: 3,
+      data: { selectedProvider: "openai", selectedModel: "slow", activeProvider: "openai", activeModel: "fast", reason: "timeout" }
+    });
+
+    expect(fallback.running).toBe(true);
+    expect(fallback.notices?.map((notice) => notice.text)).toEqual(["Run started", "Compaction completed", "Model fallback: openai/slow -> openai/fast (timeout)"]);
+  });
+
+  it("ignores malformed tool events without tool call ids", () => {
+    expect(normalizeToolEvent({ stream: "tool", data: { phase: "start", name: "exec" } })).toBeUndefined();
   });
 
   it("normalizes OpenClaw session keys separately from session ids", () => {

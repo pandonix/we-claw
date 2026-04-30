@@ -71,8 +71,36 @@ export interface TranscriptMessage {
   timestamp?: string;
 }
 
+export type ToolBlockStatus = "running" | "updated" | "completed" | "error";
+
+export interface ToolBlock {
+  id: string;
+  toolCallId: string;
+  runId?: string;
+  sessionKey?: string;
+  name: string;
+  status: ToolBlockStatus;
+  summary: string;
+  input?: string;
+  output?: string;
+  startedAt?: number;
+  updatedAt?: number;
+}
+
+export type ConversationNoticeKind = "runtime" | "compaction" | "fallback" | "error";
+
+export interface ConversationNotice {
+  id: string;
+  kind: ConversationNoticeKind;
+  text: string;
+  timestamp: number;
+  runId?: string;
+}
+
 export interface ChatState {
   messages: TranscriptMessage[];
+  toolBlocks?: ToolBlock[];
+  notices?: ConversationNotice[];
   running: boolean;
   error?: string;
 }
