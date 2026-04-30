@@ -1,4 +1,9 @@
 :root {
+  --rail-width: 292px;
+  --workspace-gutter: clamp(48px, 6vw, 112px);
+  --conversation-max-width: 980px;
+  --message-max-width: 720px;
+  --statusbar-height: 30px;
   color: #171717;
   background: #f3f4f6;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -40,7 +45,7 @@ textarea:disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
   height: 100vh;
   min-height: 0;
 }
@@ -358,10 +363,10 @@ textarea:disabled {
 }
 
 .conversation {
-  width: min(920px, calc(100vw - 360px));
+  width: min(var(--conversation-max-width), calc(100vw - var(--rail-width) - (var(--workspace-gutter) * 2)));
   min-width: 0;
   margin: 0 auto;
-  padding: 28px 0 172px;
+  padding: 32px 0 176px;
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -377,7 +382,7 @@ textarea:disabled {
 .message p {
   grid-column: 1;
   width: fit-content;
-  max-width: min(660px, 100%);
+  max-width: min(var(--message-max-width), 76%);
   padding: 10px 13px;
   border: 1px solid #e2e5ea;
   border-radius: 10px;
@@ -452,7 +457,7 @@ textarea:disabled {
   align-items: center;
   gap: 10px;
   width: fit-content;
-  max-width: min(660px, calc(100vw - 540px));
+  max-width: min(var(--message-max-width), 76%);
   padding: 10px 12px;
   background: #fff;
 }
@@ -472,7 +477,7 @@ textarea:disabled {
   align-items: center;
   gap: 10px;
   width: fit-content;
-  max-width: min(660px, calc(100vw - 540px));
+  max-width: min(var(--message-max-width), 76%);
   padding: 8px 10px;
   color: #52525b;
   background: #fafafa;
@@ -507,7 +512,7 @@ textarea:disabled {
 .tool-row {
   display: grid;
   gap: 8px;
-  width: min(660px, 100%);
+  width: min(var(--message-max-width), 76%);
   padding: 10px 12px;
   background: #fbfcfd;
 }
@@ -595,9 +600,10 @@ textarea:disabled {
 
 .composer {
   position: fixed;
-  right: max(24px, calc((100vw - 292px - 860px) / 2));
-  bottom: 38px;
-  width: min(860px, calc(100vw - 340px));
+  right: max(var(--workspace-gutter), calc((100vw - var(--rail-width) - var(--conversation-max-width)) / 2));
+  bottom: calc(var(--statusbar-height) + 8px);
+  left: calc(var(--rail-width) + max(var(--workspace-gutter), calc((100vw - var(--rail-width) - var(--conversation-max-width)) / 2)));
+  width: auto;
   min-height: 92px;
   padding: 12px;
   border: 1px solid #dfe3ea;
@@ -650,12 +656,12 @@ textarea:disabled {
 
 .statusbar {
   position: fixed;
-  left: 292px;
+  left: var(--rail-width);
   right: 0;
   bottom: 0;
   justify-content: center;
   gap: 26px;
-  height: 30px;
+  height: var(--statusbar-height);
   color: #71717a;
   background: #fff;
   font-size: 12px;
