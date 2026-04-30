@@ -77,7 +77,8 @@ async function connectGateway(url: string): Promise<void> {
     gateway = new GatewayClient(url);
     gateway.onEvent((frame) => {
       if (frame.type === "chat" || frame.event === "chat") {
-        state = { ...state, chat: reduceChatEvent(state.chat, frame.params ?? frame.data ?? frame.result ?? frame) };
+        const chatEvent = frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame;
+        state = { ...state, chat: reduceChatEvent(state.chat, chatEvent), statusText: statusFromChatEvent(chatEvent, state.statusText) };
         render();
       }
       if (frame.type === "sessions.changed" || frame.event === "sessions.changed") {
@@ -118,7 +119,7 @@ async function loadSessions(): Promise<void> {
 
 async function loadHistory(sessionId: string): Promise<void> {
   if (!gateway) return;
-  const history = await gateway.request("chat.history", { sessionId }).catch((error) => {
+  const history = await gateway.request("chat.history", { sessionKey: sessionId }).catch((error) => {
     state = { ...state, statusText: error instanceof Error ? error.message : "chat.history failed" };
     return undefined;
   });
@@ -147,7 +148,19 @@ async function sendPrompt(text: string): Promise<void> {
   };
   render();
 
-  const params = state.activeSessionId ? { sessionId: state.activeSessionId, message: trimmed } : { message: trimmed };
+  const sessionKey = state.activeSessionId;
+  if (!sessionKey) {
+    state = {
+      ...state,
+      composerText: trimmed,
+      chat: { ...state.chat, running: false, error: "No OpenClaw session is selected." },
+      statusText: "发送失败，输入已保留"
+    };
+    render();
+    return;
+  }
+
+  const params = { sessionKey, message: trimmed, idempotencyKey: createIdempotencyKey() };
   const result = await gateway.request("chat.send", params).catch((error) => {
     state = {
       ...state,
@@ -159,14 +172,14 @@ async function sendPrompt(text: string): Promise<void> {
     return undefined;
   });
   if (result) {
-    state = { ...state, chat: reduceChatEvent(state.chat, result) };
+    state = { ...state, chat: reduceChatEvent(state.chat, result), statusText: statusFromChatSendResult(result) };
     render();
   }
 }
 
 async function abortRun(): Promise<void> {
-  if (!gateway) return;
-  await gateway.request("chat.abort", state.activeSessionId ? { sessionId: state.activeSessionId } : {}).catch(() => undefined);
+  if (!gateway || !state.activeSessionId) return;
+  await gateway.request("chat.abort", { sessionKey: state.activeSessionId }).catch(() => undefined);
   state = { ...state, chat: { ...state.chat, running: false }, statusText: "已请求停止当前运行" };
   render();
 }
@@ -225,7 +238,7 @@ function render(): void {
 
   bindEvents();
   const conversation = appRoot.querySelector(".conversation");
-  conversation?.scrollTo({ top: conversation.scrollHeight });
+  conversation?.scrollTo({ left: 0, top: conversation.scrollHeight });
 }
 
 function bindEvents(): void {
@@ -354,6 +367,26 @@ function labelForConnection(connection: ConnectionState): string {
     disconnected: "Disconnected",
     error: "Gateway Error"
   }[connection];
+}
+
+function createIdempotencyKey(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `we-claw-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function statusFromChatSendResult(result: unknown): string {
+  const record = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+  const runId = typeof record.runId === "string" ? record.runId : undefined;
+  const status = typeof record.status === "string" ? record.status : undefined;
+  if (runId && (status === "started" || status === "accepted" || status === "in_flight")) return `OpenClaw run ${runId.slice(0, 8)} 已启动`;
+  return "OpenClaw 已返回消息";
+}
+
+function statusFromChatEvent(event: unknown, fallback: string): string {
+  const record = event && typeof event === "object" ? (event as Record<string, unknown>) : {};
+  if (record.state === "final") return "OpenClaw 已返回消息";
+  if (record.state === "error") return "OpenClaw 返回错误";
+  if (record.state === "aborted") return "OpenClaw 运行已停止";
+  return fallback;
 }
 
 function formatRelative(value?: string): string {

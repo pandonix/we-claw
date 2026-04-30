@@ -25,13 +25,22 @@ function textFromContent(value: unknown): string {
 }
 
 export function normalizeSession(value: unknown): SessionSummary {
+  const directKey = asString(value);
   const record = asRecord(value);
-  const id = asString(record.id) ?? asString(record.sessionId) ?? "unknown";
-  const title = asString(record.title) ?? asString(record.name) ?? `Session ${id.slice(0, 8)}`;
+  const sessionKey = asString(record.key) ?? asString(record.sessionKey) ?? directKey ?? asString(record.id) ?? asString(record.sessionId) ?? "unknown";
+  const sessionId = asString(record.sessionId) ?? asString(record.id);
+  const title =
+    asString(record.title) ??
+    asString(record.displayName) ??
+    asString(record.label) ??
+    asString(record.name) ??
+    `Session ${(sessionId ?? sessionKey).slice(0, 8)}`;
   const status = normalizeStatus(record.status, record.running);
 
   return {
-    id,
+    id: sessionKey,
+    sessionKey,
+    sessionId,
     title,
     subtitle: asString(record.subtitle) ?? asString(record.workspace) ?? asString(record.agent) ?? "OpenClaw Gateway",
     updatedAt: asString(record.updatedAt) ?? asString(record.updated_at) ?? asString(record.lastMessageAt),
@@ -47,8 +56,8 @@ export function normalizeSessions(value: unknown): SessionSummary[] {
 
 export function normalizeMessage(value: unknown, fallbackId: string): TranscriptMessage {
   const record = asRecord(value);
-  const role = record.role === "user" || record.role === "assistant" || record.role === "system" ? record.role : "assistant";
-  const text = textFromContent(record.text ?? record.message ?? record.content ?? record.delta);
+  const role = record.role === "user" || record.role === "assistant" || record.role === "system" || record.role === "error" ? record.role : "assistant";
+  const text = textFromContent(record.text ?? record.message ?? record.content ?? record.delta ?? record.errorMessage ?? record.summary);
 
   return {
     id: asString(record.id) ?? asString(record.messageId) ?? fallbackId,
@@ -67,8 +76,12 @@ export function normalizeHistory(value: unknown): TranscriptMessage[] {
 
 export function reduceChatEvent(state: ChatState, event: unknown): ChatState {
   const record = asRecord(event);
-  const kind = asString(record.kind) ?? asString(record.status) ?? asString(record.type);
+  const kind = asString(record.kind) ?? asString(record.state) ?? asString(record.status) ?? asString(record.type);
   const message = normalizeMessage(record.message ?? record, `event-${state.messages.length}`);
+
+  if (kind === "started" || kind === "accepted" || kind === "in_flight") {
+    return { ...state, running: true, error: undefined };
+  }
 
   if (kind === "error") {
     return { ...state, running: false, error: message.text, messages: [...state.messages, { ...message, role: "error", status: "error" }] };
@@ -87,6 +100,17 @@ export function reduceChatEvent(state: ChatState, event: unknown): ChatState {
       messages.push({ ...message, role: "assistant", status: "running" });
     }
     return { ...state, running: true, messages };
+  }
+
+  if (kind === "final") {
+    const messages = [...state.messages];
+    const last = messages[messages.length - 1];
+    const finalMessage: TranscriptMessage = { ...message, role: "assistant", status: "final" };
+    if (last?.role === "assistant" && last.status === "running") {
+      messages[messages.length - 1] = { ...finalMessage, id: message.id || last.id, text: message.text || last.text };
+      return { ...state, running: false, error: undefined, messages };
+    }
+    return { ...state, running: false, error: undefined, messages: [...messages, finalMessage] };
   }
 
   return { ...state, running: kind === "running", messages: [...state.messages, message] };

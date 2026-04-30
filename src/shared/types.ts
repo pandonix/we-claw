@@ -38,6 +38,7 @@ export interface GatewayFrame {
   id?: string | number;
   method?: string;
   event?: string;
+  payload?: unknown;
   result?: unknown;
   error?: unknown;
   params?: unknown;
@@ -52,6 +53,8 @@ export type SessionStatus = "running" | "idle" | "error" | "unknown";
 
 export interface SessionSummary {
   id: string;
+  sessionKey: string;
+  sessionId?: string;
   title: string;
   subtitle: string;
   updatedAt?: string;
