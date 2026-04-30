@@ -1,0 +1,26 @@
+{
+  "name": "we-claw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "we-claw": "./dist/src/launcher/cli.js"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "start": "node dist/src/launcher/cli.js start"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.4",
+    "vitest": "^3.1.2"
+  }
+}
