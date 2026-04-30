@@ -117,10 +117,11 @@ describe("normalizers", () => {
         sessions: [
           { key: "agent:main:main", sessionId: "764e1dd9-d862-41ca-b98a-9b3209919094", displayName: "agent:main:main" },
           { key: "s2", derivedTitle: "764e1dd9-d862-41ca-b98a-9b3209919094" },
-          { key: "s3", label: "Session 764e1dd9" }
+          { key: "s3", label: "Session 764e1dd9" },
+          { key: "s4", label: "3611e932 (2026-04-30)" }
         ]
       }).map((session) => session.title)
-    ).toEqual([UNTITLED_SESSION, UNTITLED_SESSION, UNTITLED_SESSION]);
+    ).toEqual([UNTITLED_SESSION, UNTITLED_SESSION, UNTITLED_SESSION, UNTITLED_SESSION]);
   });
 
   it("derives a readable title from chat history user messages", () => {

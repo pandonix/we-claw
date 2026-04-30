@@ -193,6 +193,7 @@ function isTechnicalSessionTitle(text: string, sessionKey?: string, sessionId?: 
   const identifiers = [sessionKey, sessionId].filter((value): value is string => Boolean(value));
   if (identifiers.includes(text)) return true;
   if (/^session\s+[0-9a-f-]{6,}$/i.test(text)) return true;
+  if (/^[0-9a-f]{8}\s+\(\d{4}-\d{2}-\d{2}\)$/i.test(text)) return true;
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)) return true;
   if (/^[a-z0-9]+:[a-z0-9_.:-]+$/i.test(text)) return true;
   if (/^[0-9a-f]{16,}$/i.test(text)) return true;

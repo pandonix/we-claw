@@ -3,6 +3,8 @@ import { normalizeHistory, normalizeSessions, reduceChatEvent, titleFromHistory,
 import type { BootstrapResponse, ChatState, ConnectionState, SessionSummary, TranscriptMessage } from "../shared/types";
 import "./styles.css";
 
+const SESSION_TITLE_CACHE_KEY = "we-claw.sessionTitleCache.v1";
+
 interface AppState {
   bootstrap?: BootstrapResponse;
   connection: ConnectionState;
@@ -12,6 +14,7 @@ interface AppState {
   composerText: string;
   statusText: string;
   isCreatingSession: boolean;
+  isRefreshingSessions: boolean;
 }
 
 const maybeRoot = document.querySelector<HTMLDivElement>("#app");
@@ -29,7 +32,8 @@ let state: AppState = {
   },
   composerText: "",
   statusText: "正在读取本地启动状态",
-  isCreatingSession: false
+  isCreatingSession: false,
+  isRefreshingSessions: false
 };
 
 render();
@@ -96,21 +100,39 @@ async function connectGateway(url: string): Promise<void> {
   }
 }
 
-async function loadSessions(options: { loadHistoryForActive?: boolean } = {}): Promise<void> {
+async function loadSessions(options: { loadHistoryForActive?: boolean; showRefreshing?: boolean } = {}): Promise<void> {
   if (!gateway) return;
-  const result = await gateway.request("sessions.list", {
-    includeDerivedTitles: true,
-    includeLastMessage: true
-  }).catch((error) => {
-    state = { ...state, statusText: error instanceof Error ? error.message : "sessions.list failed" };
-    return undefined;
-  });
-  const sessions = normalizeSessions(result);
-  const hasActiveSession = Boolean(state.activeSessionId && sessions.some((session) => session.id === state.activeSessionId));
-  const activeSessionId = hasActiveSession ? state.activeSessionId : sessions[0]?.id;
-  state = { ...state, sessions, activeSessionId };
-  render();
-  if (activeSessionId && options.loadHistoryForActive) await loadHistory(activeSessionId);
+  if (options.showRefreshing) {
+    if (state.isRefreshingSessions) return;
+    state = { ...state, isRefreshingSessions: true, statusText: "正在刷新会话列表" };
+    render();
+  }
+
+  try {
+    const result = await gateway
+      .request("sessions.list", {
+        includeDerivedTitles: true,
+        includeLastMessage: true
+      })
+      .catch((error) => {
+        state = { ...state, statusText: error instanceof Error ? error.message : "sessions.list failed" };
+        return undefined;
+      });
+    if (result === undefined) return;
+
+    const sessions = applyCachedTitles(normalizeSessions(result));
+    const hasActiveSession = Boolean(state.activeSessionId && sessions.some((session) => session.id === state.activeSessionId));
+    const activeSessionId = hasActiveSession ? state.activeSessionId : sessions[0]?.id;
+    const statusText = options.showRefreshing && (!activeSessionId || !options.loadHistoryForActive) ? "会话列表已刷新" : state.statusText;
+    state = { ...state, sessions, activeSessionId, statusText };
+    render();
+    if (activeSessionId && options.loadHistoryForActive) await loadHistory(activeSessionId);
+  } finally {
+    if (options.showRefreshing) {
+      state = { ...state, isRefreshingSessions: false };
+      render();
+    }
+  }
 }
 
 async function loadHistory(sessionId: string): Promise<void> {
@@ -182,7 +204,37 @@ async function sendPrompt(text: string): Promise<void> {
 function applyHistoryTitle(sessionId: string, messages: TranscriptMessage[]): SessionSummary[] {
   const title = titleFromHistory(messages);
   if (!title) return state.sessions;
+  saveCachedTitle(sessionId, title);
   return state.sessions.map((session) => (session.id === sessionId && session.title === UNTITLED_SESSION ? { ...session, title } : session));
+}
+
+function applyCachedTitles(sessions: SessionSummary[]): SessionSummary[] {
+  const titleCache = readTitleCache();
+  return sessions.map((session) => {
+    if (session.title !== UNTITLED_SESSION) return session;
+    const cachedTitle = titleCache[session.id] ?? (session.sessionId ? titleCache[session.sessionId] : undefined);
+    return cachedTitle ? { ...session, title: cachedTitle } : session;
+  });
+}
+
+function readTitleCache(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(SESSION_TITLE_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCachedTitle(sessionId: string, title: string): void {
+  try {
+    const titleCache = readTitleCache();
+    titleCache[sessionId] = title;
+    window.localStorage.setItem(SESSION_TITLE_CACHE_KEY, JSON.stringify(titleCache));
+  } catch {
+    // localStorage may be unavailable in hardened browser contexts; the in-memory title still works.
+  }
 }
 
 async function abortRun(): Promise<void> {
@@ -204,7 +256,7 @@ function render(): void {
         <button class="new-session" data-action="new-session" type="button" ${canCreateSession() ? "" : "disabled"} aria-busy="${state.isCreatingSession ? "true" : "false"}">${state.isCreatingSession ? "创建中..." : "+ 新会话"}</button>
         <div class="rail-heading">
           <span>Gateway Sessions</span>
-          <button type="button" aria-label="刷新会话" data-action="refresh">↻</button>
+          <button class="refresh-session ${state.isRefreshingSessions ? "refreshing" : ""}" type="button" aria-label="${state.isRefreshingSessions ? "正在刷新会话" : "刷新会话"}" title="${state.isRefreshingSessions ? "正在刷新会话" : "刷新会话"}" data-action="refresh" ${canRefreshSessions() ? "" : "disabled"} aria-busy="${state.isRefreshingSessions ? "true" : "false"}">↻</button>
         </div>
         <div class="session-list" data-testid="session-list">
           ${renderSessions()}
@@ -267,7 +319,7 @@ function bindEvents(): void {
       void loadHistory(sessionId);
     });
   });
-  appRoot.querySelector<HTMLButtonElement>("[data-action='refresh']")?.addEventListener("click", () => void loadSessions({ loadHistoryForActive: true }));
+  appRoot.querySelector<HTMLButtonElement>("[data-action='refresh']")?.addEventListener("click", () => void refreshSessions());
   appRoot.querySelector<HTMLButtonElement>("[data-action='reconnect']")?.addEventListener("click", () => void bootstrap());
   appRoot.querySelector<HTMLButtonElement>("[data-action='abort']")?.addEventListener("click", () => void abortRun());
   appRoot.querySelector<HTMLButtonElement>("[data-action='new-session']")?.addEventListener("click", () => void createSession());
@@ -303,6 +355,11 @@ async function createSession(): Promise<void> {
     state = { ...state, isCreatingSession: false };
     render();
   }
+}
+
+async function refreshSessions(): Promise<void> {
+  if (!gateway || !canRefreshSessions()) return;
+  await loadSessions({ loadHistoryForActive: true, showRefreshing: true });
 }
 
 function upsertSession(sessions: SessionSummary[], nextSession: SessionSummary): SessionSummary[] {
@@ -365,6 +422,10 @@ function canSubmit(): boolean {
 
 function canCreateSession(): boolean {
   return state.connection === "connected" && !state.isCreatingSession && (gateway?.capabilities.methods.has("sessions.create") ?? false);
+}
+
+function canRefreshSessions(): boolean {
+  return state.connection === "connected" && !state.isRefreshingSessions;
 }
 
 function statusFromBootstrap(bootstrapResponse: BootstrapResponse): string {

@@ -143,6 +143,16 @@ textarea:disabled {
   border-radius: 6px;
 }
 
+.rail-heading button.refreshing {
+  cursor: progress;
+  opacity: 1;
+}
+
+.rail-heading button.refreshing:not(:disabled),
+.rail-heading button.refreshing:disabled {
+  animation: spin 0.8s linear infinite;
+}
+
 .session-list {
   flex: 1;
   min-height: 0;
@@ -193,6 +203,12 @@ textarea:disabled {
 .session-main strong {
   font-size: 14px;
   font-weight: 650;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .session-main em,
