@@ -127,7 +127,7 @@ async function loadHistory(sessionId: string): Promise<void> {
   });
   if (requestSeq !== historyRequestSeq || state.activeSessionId !== sessionId) return;
   const messages = normalizeHistory(history);
-  state = { ...state, sessions: applyHistoryTitle(sessionId, messages), chat: { messages, running: false } };
+  state = { ...state, sessions: applyHistoryTitle(sessionId, messages), chat: { messages, running: false }, statusText: "会话历史已加载" };
   render();
 }
 
