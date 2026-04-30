@@ -1,5 +1,5 @@
 import { GatewayClient } from "../gateway/client";
-import { normalizeHistory, normalizeSessions, reduceChatEvent } from "../shared/normalizers";
+import { normalizeHistory, normalizeSessions, reduceChatEvent, titleFromHistory, UNTITLED_SESSION } from "../shared/normalizers";
 import type { BootstrapResponse, ChatState, ConnectionState, SessionSummary, TranscriptMessage } from "../shared/types";
 import "./styles.css";
 
@@ -11,6 +11,7 @@ interface AppState {
   chat: ChatState;
   composerText: string;
   statusText: string;
+  isCreatingSession: boolean;
 }
 
 const maybeRoot = document.querySelector<HTMLDivElement>("#app");
@@ -18,28 +19,17 @@ if (!maybeRoot) throw new Error("Missing #app root");
 const appRoot = maybeRoot;
 
 let gateway: GatewayClient | undefined;
+let historyRequestSeq = 0;
 let state: AppState = {
   connection: "starting",
   sessions: [],
   chat: {
-    messages: [
-      {
-        id: "intro-user",
-        role: "user",
-        text: "创建一个新的本地 OpenClaw 会话工作台。",
-        status: "final"
-      },
-      {
-        id: "intro-assistant",
-        role: "assistant",
-        text: "We-Claw 会通过本机 Node launcher 获取安全 bootstrap 信息，然后浏览器直连 loopback OpenClaw Gateway。会话列表和聊天记录都以 Gateway 为事实来源。",
-        status: "final"
-      }
-    ],
+    messages: [],
     running: false
   },
   composerText: "",
-  statusText: "正在读取本地启动状态"
+  statusText: "正在读取本地启动状态",
+  isCreatingSession: false
 };
 
 render();
@@ -78,6 +68,8 @@ async function connectGateway(url: string): Promise<void> {
     gateway.onEvent((frame) => {
       if (frame.type === "chat" || frame.event === "chat") {
         const chatEvent = frame.payload ?? frame.params ?? frame.data ?? frame.result ?? frame;
+        const eventSessionKey = sessionKeyFromEvent(chatEvent);
+        if (eventSessionKey && state.activeSessionId && eventSessionKey !== state.activeSessionId) return;
         state = { ...state, chat: reduceChatEvent(state.chat, chatEvent), statusText: statusFromChatEvent(chatEvent, state.statusText) };
         render();
       }
@@ -93,7 +85,7 @@ async function connectGateway(url: string): Promise<void> {
     state = { ...state, connection: "connected", statusText: "Gateway connected" };
     render();
     await gateway.request("health").catch(() => undefined);
-    await loadSessions();
+    await loadSessions({ loadHistoryForActive: true });
   } catch (error) {
     state = {
       ...state,
@@ -104,30 +96,39 @@ async function connectGateway(url: string): Promise<void> {
   }
 }
 
-async function loadSessions(): Promise<void> {
+async function loadSessions(options: { loadHistoryForActive?: boolean } = {}): Promise<void> {
   if (!gateway) return;
-  const result = await gateway.request("sessions.list").catch((error) => {
+  const result = await gateway.request("sessions.list", {
+    includeDerivedTitles: true,
+    includeLastMessage: true
+  }).catch((error) => {
     state = { ...state, statusText: error instanceof Error ? error.message : "sessions.list failed" };
     return undefined;
   });
   const sessions = normalizeSessions(result);
-  const activeSessionId = state.activeSessionId ?? sessions[0]?.id;
+  const hasActiveSession = Boolean(state.activeSessionId && sessions.some((session) => session.id === state.activeSessionId));
+  const activeSessionId = hasActiveSession ? state.activeSessionId : sessions[0]?.id;
   state = { ...state, sessions, activeSessionId };
   render();
-  if (activeSessionId) await loadHistory(activeSessionId);
+  if (activeSessionId && options.loadHistoryForActive) await loadHistory(activeSessionId);
 }
 
 async function loadHistory(sessionId: string): Promise<void> {
   if (!gateway) return;
+  const requestSeq = ++historyRequestSeq;
+  state = { ...state, chat: { messages: [], running: false }, statusText: "正在加载会话历史" };
+  render();
   const history = await gateway.request("chat.history", { sessionKey: sessionId }).catch((error) => {
-    state = { ...state, statusText: error instanceof Error ? error.message : "chat.history failed" };
+    if (requestSeq === historyRequestSeq && state.activeSessionId === sessionId) {
+      state = { ...state, statusText: error instanceof Error ? error.message : "chat.history failed" };
+      render();
+    }
     return undefined;
   });
+  if (requestSeq !== historyRequestSeq || state.activeSessionId !== sessionId) return;
   const messages = normalizeHistory(history);
-  if (messages.length) {
-    state = { ...state, chat: { messages, running: false } };
-    render();
-  }
+  state = { ...state, sessions: applyHistoryTitle(sessionId, messages), chat: { messages, running: false } };
+  render();
 }
 
 async function sendPrompt(text: string): Promise<void> {
@@ -140,15 +141,16 @@ async function sendPrompt(text: string): Promise<void> {
     text: trimmed,
     status: "final"
   };
+  const sessionKey = state.activeSessionId;
   state = {
     ...state,
     composerText: "",
+    sessions: sessionKey ? applyHistoryTitle(sessionKey, [userMessage]) : state.sessions,
     chat: { ...state.chat, running: true, messages: [...state.chat.messages, userMessage] },
     statusText: "chat.send 已发送"
   };
   render();
 
-  const sessionKey = state.activeSessionId;
   if (!sessionKey) {
     state = {
       ...state,
@@ -177,6 +179,12 @@ async function sendPrompt(text: string): Promise<void> {
   }
 }
 
+function applyHistoryTitle(sessionId: string, messages: TranscriptMessage[]): SessionSummary[] {
+  const title = titleFromHistory(messages);
+  if (!title) return state.sessions;
+  return state.sessions.map((session) => (session.id === sessionId && session.title === UNTITLED_SESSION ? { ...session, title } : session));
+}
+
 async function abortRun(): Promise<void> {
   if (!gateway || !state.activeSessionId) return;
   await gateway.request("chat.abort", { sessionKey: state.activeSessionId }).catch(() => undefined);
@@ -193,7 +201,7 @@ function render(): void {
           <strong>We-Claw</strong>
           <span class="gateway-dot ${state.connection}"></span>
         </div>
-        <button class="new-session" data-action="new-session" type="button" ${canCreateSession() ? "" : "disabled"}>+ 新会话</button>
+        <button class="new-session" data-action="new-session" type="button" ${canCreateSession() ? "" : "disabled"} aria-busy="${state.isCreatingSession ? "true" : "false"}">${state.isCreatingSession ? "创建中..." : "+ 新会话"}</button>
         <div class="rail-heading">
           <span>Gateway Sessions</span>
           <button type="button" aria-label="刷新会话" data-action="refresh">↻</button>
@@ -259,7 +267,7 @@ function bindEvents(): void {
       void loadHistory(sessionId);
     });
   });
-  appRoot.querySelector<HTMLButtonElement>("[data-action='refresh']")?.addEventListener("click", () => void loadSessions());
+  appRoot.querySelector<HTMLButtonElement>("[data-action='refresh']")?.addEventListener("click", () => void loadSessions({ loadHistoryForActive: true }));
   appRoot.querySelector<HTMLButtonElement>("[data-action='reconnect']")?.addEventListener("click", () => void bootstrap());
   appRoot.querySelector<HTMLButtonElement>("[data-action='abort']")?.addEventListener("click", () => void abortRun());
   appRoot.querySelector<HTMLButtonElement>("[data-action='new-session']")?.addEventListener("click", () => void createSession());
@@ -267,14 +275,40 @@ function bindEvents(): void {
 
 async function createSession(): Promise<void> {
   if (!gateway || !canCreateSession()) return;
-  const result = await gateway.request("sessions.create", {}).catch(() => undefined);
+  state = { ...state, isCreatingSession: true, statusText: "正在创建 OpenClaw session" };
+  render();
+
+  const result = await gateway.request("sessions.create", {}).catch((error) => {
+    state = {
+      ...state,
+      isCreatingSession: false,
+      statusText: error instanceof Error ? error.message : "sessions.create failed"
+    };
+    render();
+    return undefined;
+  });
   const [session] = normalizeSessions([result]);
   if (session) {
-    state = { ...state, sessions: [session, ...state.sessions], activeSessionId: session.id };
+    state = {
+      ...state,
+      sessions: upsertSession(state.sessions, session),
+      activeSessionId: session.id,
+      chat: { messages: [], running: false },
+      isCreatingSession: false,
+      statusText: "新会话已创建"
+    };
     render();
   } else {
-    await loadSessions();
+    await loadSessions({ loadHistoryForActive: true });
+    state = { ...state, isCreatingSession: false };
+    render();
   }
+}
+
+function upsertSession(sessions: SessionSummary[], nextSession: SessionSummary): SessionSummary[] {
+  const existingIndex = sessions.findIndex((session) => session.id === nextSession.id);
+  if (existingIndex === -1) return [nextSession, ...sessions];
+  return [nextSession, ...sessions.slice(0, existingIndex), ...sessions.slice(existingIndex + 1)];
 }
 
 function renderSessions(): string {
@@ -330,7 +364,7 @@ function canSubmit(): boolean {
 }
 
 function canCreateSession(): boolean {
-  return gateway?.capabilities.methods.has("sessions.create") ?? false;
+  return state.connection === "connected" && !state.isCreatingSession && (gateway?.capabilities.methods.has("sessions.create") ?? false);
 }
 
 function statusFromBootstrap(bootstrapResponse: BootstrapResponse): string {
@@ -387,6 +421,11 @@ function statusFromChatEvent(event: unknown, fallback: string): string {
   if (record.state === "error") return "OpenClaw 返回错误";
   if (record.state === "aborted") return "OpenClaw 运行已停止";
   return fallback;
+}
+
+function sessionKeyFromEvent(event: unknown): string | undefined {
+  const record = event && typeof event === "object" ? (event as Record<string, unknown>) : {};
+  return typeof record.sessionKey === "string" && record.sessionKey.trim() ? record.sessionKey.trim() : undefined;
 }
 
 function formatRelative(value?: string): string {

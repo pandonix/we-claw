@@ -1,11 +1,16 @@
 import type { ChatState, SessionStatus, SessionSummary, TranscriptMessage } from "./types";
 
+export const UNTITLED_SESSION = "未命名会话";
+const SUMMARY_TITLE_LENGTH = 64;
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
 function asString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text ? text : undefined;
 }
 
 function textFromContent(value: unknown): string {
@@ -24,17 +29,30 @@ function textFromContent(value: unknown): string {
   return asString(record.text) ?? asString(record.content) ?? "";
 }
 
+function visibleTextFromContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return textFromContent(value);
+  return value
+    .map((part) => {
+      if (typeof part === "string") return part;
+      const record = asRecord(part);
+      const type = asString(record.type);
+      if (type && type !== "text") return "";
+      return asString(record.text) ?? asString(record.content) ?? "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 export function normalizeSession(value: unknown): SessionSummary {
   const directKey = asString(value);
   const record = asRecord(value);
   const sessionKey = asString(record.key) ?? asString(record.sessionKey) ?? directKey ?? asString(record.id) ?? asString(record.sessionId) ?? "unknown";
   const sessionId = asString(record.sessionId) ?? asString(record.id);
   const title =
-    asString(record.title) ??
-    asString(record.displayName) ??
-    asString(record.label) ??
-    asString(record.name) ??
-    `Session ${(sessionId ?? sessionKey).slice(0, 8)}`;
+    readableSessionTitle([record.displayName, record.derivedTitle, record.label], sessionKey, sessionId) ??
+    readableSessionTitle([truncateTitleCandidate(record.lastMessagePreview)], sessionKey, sessionId) ??
+    UNTITLED_SESSION;
   const status = normalizeStatus(record.status, record.running);
 
   return {
@@ -46,6 +64,12 @@ export function normalizeSession(value: unknown): SessionSummary {
     updatedAt: asString(record.updatedAt) ?? asString(record.updated_at) ?? asString(record.lastMessageAt),
     status
   };
+}
+
+export function titleFromHistory(messages: TranscriptMessage[]): string | undefined {
+  const firstUserMessage = messages.find((message) => message.role === "user");
+  const recentUserMessage = findRecentUserMessage(messages);
+  return readableSessionTitle([truncateTitleCandidate(firstUserMessage?.text), truncateTitleCandidate(recentUserMessage?.text)]);
 }
 
 export function normalizeSessions(value: unknown): SessionSummary[] {
@@ -71,7 +95,7 @@ export function normalizeMessage(value: unknown, fallbackId: string): Transcript
 export function normalizeHistory(value: unknown): TranscriptMessage[] {
   const record = asRecord(value);
   const messages = Array.isArray(value) ? value : Array.isArray(record.messages) ? record.messages : Array.isArray(record.history) ? record.history : [];
-  return messages.map((message, index) => normalizeMessage(message, `history-${index}`));
+  return messages.flatMap((message, index) => normalizeHistoryMessage(message, `history-${index}`));
 }
 
 export function reduceChatEvent(state: ChatState, event: unknown): ChatState {
@@ -120,4 +144,57 @@ function normalizeStatus(status: unknown, running: unknown): SessionStatus {
   if (running === true) return "running";
   if (status === "running" || status === "idle" || status === "error") return status;
   return "unknown";
+}
+
+function normalizeHistoryMessage(value: unknown, fallbackId: string): TranscriptMessage[] {
+  const record = asRecord(value);
+  if (record.role !== "user" && record.role !== "assistant" && record.role !== "system" && record.role !== "error") return [];
+  const text = visibleTextFromContent(record.text ?? record.message ?? record.content ?? record.delta ?? record.errorMessage ?? record.summary);
+  if (!text.trim()) return [];
+  return [
+    {
+      id: asString(record.id) ?? asString(record.messageId) ?? fallbackId,
+      role: record.role,
+      text,
+      status: record.status === "running" || record.status === "error" || record.status === "aborted" ? record.status : "final",
+      timestamp: asString(record.timestamp) ?? asString(record.createdAt)
+    }
+  ];
+}
+
+function findRecentUserMessage(messages: TranscriptMessage[]): TranscriptMessage | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") return messages[index];
+  }
+  return undefined;
+}
+
+function readableSessionTitle(candidates: unknown[], sessionKey?: string, sessionId?: string): string | undefined {
+  for (const candidate of candidates) {
+    const text = normalizeTitleCandidate(candidate);
+    if (!text || isTechnicalSessionTitle(text, sessionKey, sessionId)) continue;
+    return text;
+  }
+  return undefined;
+}
+
+function normalizeTitleCandidate(value: unknown): string | undefined {
+  const text = asString(value);
+  return text?.replace(/\s+/g, " ");
+}
+
+function truncateTitleCandidate(value: unknown): string | undefined {
+  const text = normalizeTitleCandidate(value);
+  if (!text) return undefined;
+  return text.length > SUMMARY_TITLE_LENGTH ? `${text.slice(0, SUMMARY_TITLE_LENGTH - 1)}…` : text;
+}
+
+function isTechnicalSessionTitle(text: string, sessionKey?: string, sessionId?: string): boolean {
+  const identifiers = [sessionKey, sessionId].filter((value): value is string => Boolean(value));
+  if (identifiers.includes(text)) return true;
+  if (/^session\s+[0-9a-f-]{6,}$/i.test(text)) return true;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)) return true;
+  if (/^[a-z0-9]+:[a-z0-9_.:-]+$/i.test(text)) return true;
+  if (/^[0-9a-f]{16,}$/i.test(text)) return true;
+  return false;
 }
