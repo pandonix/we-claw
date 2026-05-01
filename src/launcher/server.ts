@@ -61,7 +61,7 @@ export async function startWeClawServer(options: { root?: string; openBrowser?: 
     serveStatic(root, request.url ?? "/", response);
   });
   installGatewayBridge(server, context);
-  installRuntimeBridge(server, context);
+  const runtimeBridge = installRuntimeBridge(server, context);
 
   await new Promise<void>((resolveListen) => server.listen(context.config.httpPort, context.config.host, resolveListen));
 
@@ -70,6 +70,7 @@ export async function startWeClawServer(options: { root?: string; openBrowser?: 
     url,
     close: async () => {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      runtimeBridge.close();
     }
   };
 }

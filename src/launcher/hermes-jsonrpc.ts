@@ -9,6 +9,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const MAX_LOG_LINES = 80;
 const MAX_LOG_LINE_BYTES = 4096;
 
+// Hermes TUI Gateway uses newline-delimited JSON-RPC over stdio, matching
+// ui-tui's gateway client. This is not LSP Content-Length framing.
 export interface HermesGatewayEvent {
   type: string;
   session_id?: string;

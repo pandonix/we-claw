@@ -10,6 +10,15 @@ import { redact } from "./redact.js";
 import { detectClaudeAgentSdkVersion, runtimeBootstrap } from "./runtime-bridge.js";
 
 const execFileAsync = promisify(execFile);
+const HERMES_DETECTION_CACHE_TTL_MS = 30_000;
+
+let hermesDetectionCache:
+  | {
+      key: string;
+      expiresAt: number;
+      promise: Promise<HermesDetection>;
+    }
+  | undefined;
 
 export interface LauncherContext {
   config: LauncherConfig;
@@ -36,7 +45,7 @@ export async function createBootstrapSnapshot(context: LauncherContext): Promise
   }
 
   const openclaw = await detectOpenClaw(context.config.openclawExecutable);
-  const hermes = await detectHermes(context.config);
+  const hermes = context.config.runtimeKind === "hermes" ? await detectHermes(context.config) : hermesStatusFromConfig(context.config);
   if (!openclaw.available) {
     diagnostics.push({
       code: "openclaw.missing",
@@ -248,23 +257,40 @@ interface HermesDetection {
 
 export async function detectHermes(config: LauncherConfig): Promise<HermesDetection> {
   if (!config.hermesRoot) return hermesStatusFromConfig(config);
+  const cacheKey = [config.hermesPython, config.hermesRoot, config.hermesCwd, config.hermesStartupTimeoutMs].join("\0");
+  const now = Date.now();
+  if (hermesDetectionCache?.key === cacheKey && hermesDetectionCache.expiresAt > now) {
+    return hermesDetectionCache.promise;
+  }
+
+  const promise = detectHermesUncached(config);
+  hermesDetectionCache = {
+    key: cacheKey,
+    expiresAt: now + HERMES_DETECTION_CACHE_TTL_MS,
+    promise
+  };
+  return promise;
+}
+
+async function detectHermesUncached(config: LauncherConfig): Promise<HermesDetection> {
+  const hermesRoot = config.hermesRoot;
+  if (!hermesRoot) return hermesStatusFromConfig(config);
   try {
     const pythonPath = process.env.PYTHONPATH?.trim();
     const env = {
       ...process.env,
-      PYTHONPATH: pythonPath ? `${config.hermesRoot}${delimiter}${pythonPath}` : config.hermesRoot
+      PYTHONPATH: pythonPath ? `${hermesRoot}${delimiter}${pythonPath}` : hermesRoot
     };
-    const { stdout, stderr } = await execFileAsync(
+    await execFileAsync(
       config.hermesPython,
-      ["-c", "import tui_gateway.entry; print('tui_gateway.entry')"],
+      ["-c", "import tui_gateway.entry"],
       { cwd: config.hermesCwd, env, timeout: config.hermesStartupTimeoutMs }
     );
     return {
       available: true,
       code: "hermes.available",
       message: "Hermes TUI Gateway entry is available.",
-      detail: `Hermes root: ${config.hermesRoot}`,
-      version: redact((stdout || stderr).trim()) || undefined
+      detail: `Hermes root: ${hermesRoot}`
     };
   } catch (error) {
     const message = error instanceof Error ? redact(error.message) : redact(String(error));

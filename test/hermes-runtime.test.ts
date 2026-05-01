@@ -2,16 +2,22 @@ import { describe, expect, it } from "vitest";
 import { createLauncherContext } from "../src/launcher/bootstrap";
 import { frameFromHermesEvent, HermesRuntime, normalizeHermesHistory, normalizeHermesSessions, type HermesRpcClient } from "../src/launcher/hermes-runtime";
 import type { GatewayFrame } from "../src/shared/types";
+import { reduceChatEvent } from "../src/shared/normalizers";
 
 class MockHermesClient implements HermesRpcClient {
   requests: { method: string; params?: Record<string, unknown> }[] = [];
+  failTitle = false;
+  omitTitleSessionKey = false;
   private listener?: (event: { type: string; session_id?: string; payload?: unknown }) => void;
 
   async request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.requests.push({ method, params });
     if (method === "session.list") return { sessions: [{ id: "persisted-1", title: "Existing", started_at: 1777550000, source: "tui" }] } as T;
     if (method === "session.create") return { session_id: "active-1", info: { cwd: "/tmp/hermes" } } as T;
-    if (method === "session.title") return { title: "", session_key: "persisted-1" } as T;
+    if (method === "session.title") {
+      if (this.failTitle) throw new Error("session.title failed");
+      return { title: "", session_key: this.omitTitleSessionKey ? "" : "persisted-1" } as T;
+    }
     if (method === "session.resume") return { session_id: "active-resumed", resumed: params?.session_id, messages: [] } as T;
     if (method === "session.history") return { messages: [{ role: "user", text: "hello" }, { role: "assistant", text: "hi" }] } as T;
     if (method === "prompt.submit") return { status: "streaming" } as T;
@@ -57,6 +63,11 @@ describe("Hermes runtime adapter", () => {
         status: "idle"
       }
     ]);
+    expect(normalizeHermesSessions({ sessions: [{ id: "hermes:hermes:abc", title: "Chat" }] })[0]).toMatchObject({
+      id: "hermes:abc",
+      sessionKey: "hermes:abc",
+      sessionId: "abc"
+    });
   });
 
   it("recovers the persisted session id after session.create", async () => {
@@ -69,6 +80,16 @@ describe("Hermes runtime adapter", () => {
       sessionKey: "hermes:persisted-1",
       sessionId: "persisted-1"
     });
+  });
+
+  it("fails session creation rather than persisting active Hermes ids", async () => {
+    const failedLookup = new MockHermesClient();
+    failedLookup.failTitle = true;
+    await expect(runtime(failedLookup).createSession()).rejects.toThrow("session.title failed");
+
+    const missingKey = new MockHermesClient();
+    missingKey.omitTitleSessionKey = true;
+    await expect(runtime(missingKey).createSession()).rejects.toThrow("persisted session key");
   });
 
   it("resumes historical sessions before history, send, and interrupt calls", async () => {
@@ -92,6 +113,16 @@ describe("Hermes runtime adapter", () => {
     ]);
   });
 
+  it("does not treat foreign session keys as Hermes persisted ids", async () => {
+    const client = new MockHermesClient();
+    const hermes = runtime(client);
+
+    await hermes.loadHistory("agent:main:main");
+
+    expect(client.requests.map((request) => request.method)).toEqual(["session.create", "session.title", "session.history"]);
+    expect(client.requests[2]).toEqual({ method: "session.history", params: { session_id: "active-1" } });
+  });
+
   it("routes Hermes stream events through Gateway-like frames with stable session keys", async () => {
     const client = new MockHermesClient();
     const hermes = runtime(client);
@@ -105,6 +136,17 @@ describe("Hermes runtime adapter", () => {
     expect(frames[0]).toMatchObject({ type: "chat", payload: { state: "delta", sessionKey: "hermes:persisted-1", delta: "partial" } });
     expect(frames[1]).toMatchObject({ type: "chat", payload: { state: "final", sessionKey: "hermes:persisted-1" } });
     expect(frames[2]).toMatchObject({ type: "event", event: "session.message", payload: { sessionKey: "hermes:persisted-1" } });
+  });
+
+  it("keeps Hermes streaming deltas on one running assistant message", () => {
+    const first = frameFromHermesEvent({ type: "message.delta", payload: { text: "hel" } }, "hermes:persisted-1")?.payload;
+    const second = frameFromHermesEvent({ type: "message.delta", payload: { text: "lo" } }, "hermes:persisted-1")?.payload;
+
+    expect(first).toMatchObject({ state: "delta", delta: "hel" });
+    expect(first).not.toHaveProperty("message");
+
+    const chat = reduceChatEvent(reduceChatEvent({ messages: [], running: false }, first), second);
+    expect(chat.messages).toEqual([{ id: "event-0", role: "assistant", text: "hello", status: "running", timestamp: undefined }]);
   });
 
   it("normalizes Hermes history and event frames without frontend-specific protocol branches", () => {

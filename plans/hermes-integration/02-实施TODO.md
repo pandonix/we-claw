@@ -19,6 +19,7 @@
 - [x] `src/launcher/hermes-jsonrpc.ts` 解析 stdout JSON-RPC response，以及 `method: "event"` notification；协议异常统一抛出可 redaction 的 launcher error
 - [x] `src/launcher/hermes-jsonrpc.ts` 收敛 stderr、spawn error、protocol error、startup timeout，供 `bootstrap.ts` 和 runtime bridge 转成 diagnostic / response error
 - [x] `src/launcher/hermes-jsonrpc.ts` 暴露 `dispose()`，用于浏览器断连、launcher 退出、runtime 切换时清理 Hermes 子进程与 pending request
+- [x] `src/launcher/hermes-jsonrpc.ts` 明确记录当前采用 newline-delimited JSON-RPC over stdio，不是 LSP `Content-Length` framing；真实 Hermes lifecycle 验证前仍按风险跟踪
 - [x] 新增 `src/launcher/hermes-runtime.ts`，只负责 We-Claw runtime adapter、方法翻译、session 映射与事件归一化；不重复持有底层进程管理逻辑
 
 ## 3. Runtime Bridge 接线
@@ -35,6 +36,8 @@
 - [x] Hermes adapter 支持 `chat.send` -> `prompt.submit`
 - [x] Hermes adapter 支持 `chat.abort` -> `session.interrupt`
 - [x] Hermes adapter 内维护 `hermes:<persistedSessionId>` 与 active Hermes `session_id` 的映射；UI / work index 只看持久 `sessionKey`
+- [x] Hermes adapter 在 `session.title` 无法返回持久 session key 时 fail loud，不把 active runtime `session_id` 退化写入 work index
+- [x] 浏览器 socket 断连只清理订阅；Hermes 子进程由 server close / process exit 清理，避免其他 in-flight prompt 被断连 tab 中断
 - [x] `src/launcher/server.ts`：runtime 切换到 OpenClaw 时仍只启动 OpenClaw Gateway；切换到 Hermes 时不要误触发 Gateway 管理逻辑
 
 ## 4. Shared Types 与 Normalization
@@ -43,6 +46,7 @@
 - [x] `src/launcher/hermes-runtime.ts`：把 `session.list` 结果映射成 `SessionSummary`，统一使用 `id/sessionKey = hermes:<persistedSessionId>`，`sessionId = persistedSessionId`
 - [x] `src/launcher/hermes-runtime.ts`：把 `session.resume` / `session.history` 结果映射成 `TranscriptMessage[]`
 - [x] `src/launcher/hermes-runtime.ts`：把 `message.start`、`message.delta.payload.text`、`message.complete` 转成现有 `chatPayload()` 可被 `src/shared/normalizers.ts` 的 `reduceChatEvent()` 消费的 shape
+- [x] `src/launcher/hermes-runtime.ts`：`message.delta` 只发送 delta 文本，不附带随机 message id，保证 reducer 将流式 token 合并到同一条 running assistant message
 - [x] `src/launcher/hermes-runtime.ts`：把 `error` 转成 transcript error，并结束当前 running 状态
 - [x] `src/launcher/hermes-runtime.ts`：把 `status.update` 转成 runtime notice 或轻量 lifecycle event；不要污染普通聊天消息
 - [x] `src/launcher/hermes-runtime.ts`：把 `tool.start` / `tool.progress` / `tool.complete` 首期转成现有 `session.tool` / compact tool row shape，复用 `src/shared/normalizers.ts` 的 `reduceToolEvent()`
@@ -81,4 +85,5 @@
 - [ ] Hermes tool activity 完整结构化展示
 - [ ] Hermes slash command / path completion / image attach
 - [ ] Hermes usage、model、cwd、logs 展示
+- [ ] Hermes TUI `cols` 从固定首期常量升级为可配置/viewport-aware
 - [ ] Hermes Dashboard / FastAPI WebSocket 备选接入评估

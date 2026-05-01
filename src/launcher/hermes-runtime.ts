@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import type { ConversationNotice, GatewayFrame, RuntimeCapabilities, SessionSummary, ToolBlock, TranscriptMessage } from "../shared/types";
 import type { LauncherContext } from "./bootstrap.js";
 import { HermesJsonRpcClient, type HermesGatewayEvent } from "./hermes-jsonrpc.js";
@@ -6,6 +5,8 @@ import { redact } from "./redact.js";
 
 const HERMES_SESSION_PREFIX = "hermes:";
 const DEFAULT_SESSION_LIMIT = 200;
+const HERMES_TUI_COLS = 100;
+const HERMES_INTERRUPT_TIMEOUT_MS = 5_000;
 
 type RuntimeEventEmitter = (frame: GatewayFrame) => void;
 
@@ -44,11 +45,11 @@ export class HermesRuntime {
 
   async createSession(emit?: RuntimeEventEmitter): Promise<SessionSummary> {
     this.subscribeClientEvents();
-    const result = await this.client.request("session.create", { cols: 100 });
+    const result = await this.client.request("session.create", { cols: HERMES_TUI_COLS });
     const activeSessionId = sessionIdFromResult(result);
     if (!activeSessionId) throw new Error("Hermes session.create did not return session_id.");
 
-    const persistedSessionId = await this.lookupPersistedSessionId(activeSessionId).catch(() => activeSessionId);
+    const persistedSessionId = await this.lookupPersistedSessionId(activeSessionId);
     this.rememberSession(persistedSessionId, activeSessionId);
     const summary = normalizeHermesSession({
       id: persistedSessionId,
@@ -86,7 +87,7 @@ export class HermesRuntime {
   async abort(sessionKey: string): Promise<unknown> {
     this.subscribeClientEvents();
     const activeSessionId = await this.ensureActiveSession(sessionKey);
-    await this.client.request("session.interrupt", { session_id: activeSessionId }, 5000);
+    await this.client.request("session.interrupt", { session_id: activeSessionId }, HERMES_INTERRUPT_TIMEOUT_MS);
     return { status: "aborted", sessionKey };
   }
 
@@ -136,7 +137,7 @@ export class HermesRuntime {
     const existingActive = this.persistedToActive.get(sessionId);
     if (existingActive) return existingActive;
 
-    const result = await this.client.request("session.resume", { session_id: sessionId, cols: 100 });
+    const result = await this.client.request("session.resume", { session_id: sessionId, cols: HERMES_TUI_COLS });
     const activeSessionId = sessionIdFromResult(result);
     if (!activeSessionId) throw new Error("Hermes session.resume did not return session_id.");
     this.rememberSession(sessionId, activeSessionId);
@@ -145,8 +146,12 @@ export class HermesRuntime {
 
   private async lookupPersistedSessionId(activeSessionId: string): Promise<string> {
     const titleResult = await this.client.request("session.title", { session_id: activeSessionId });
-    const sessionKey = asString(asRecord(titleResult).session_key);
-    return sessionKey ?? activeSessionId;
+    const record = asRecord(titleResult);
+    const persistedSessionId = persistedHermesSessionId(asString(record.session_key) ?? asString(record.id) ?? asString(record.sessionId));
+    if (!persistedSessionId) {
+      throw new Error("Hermes session.title did not return a persisted session key.");
+    }
+    return persistedSessionId;
   }
 
   private rememberSession(persistedSessionId: string, activeSessionId: string): void {
@@ -205,7 +210,7 @@ export function hermesCapabilities(): RuntimeCapabilities {
 
 export function normalizeHermesSession(value: unknown): SessionSummary {
   const record = asRecord(value);
-  const persistedId = asString(record.id) ?? asString(record.session_id) ?? asString(record.sessionKey) ?? "unknown";
+  const persistedId = persistedHermesSessionId(asString(record.id) ?? asString(record.session_id) ?? asString(record.sessionKey)) ?? "unknown";
   const title = asString(record.title) ?? asString(record.preview) ?? "未命名会话";
   const timestamp = asNumber(record.started_at) ? new Date(asNumber(record.started_at)! * 1000).toISOString() : undefined;
   const source = asString(record.source);
@@ -226,7 +231,7 @@ export function normalizeHermesSessions(value: unknown): SessionSummary[] {
   return sessions.map(normalizeHermesSession).filter((session) => session.sessionId && session.sessionId !== "unknown");
 }
 
-export function normalizeHermesHistory(value: unknown, sessionKey: string): RuntimeHistory {
+export function normalizeHermesHistory(value: unknown, _sessionKey: string): RuntimeHistory {
   const record = asRecord(value);
   const messages = Array.isArray(value) ? value : Array.isArray(record.messages) ? record.messages : [];
   const transcript: TranscriptMessage[] = [];
@@ -234,7 +239,7 @@ export function normalizeHermesHistory(value: unknown, sessionKey: string): Runt
     const message = normalizeHermesMessage(item, `hermes-history-${index}`);
     if (message) transcript.push(message);
   });
-  return { messages: transcript, toolBlocks: [], notices: [{ id: `notice:hermes:${sessionKey}`, kind: "runtime", text: "Hermes history loaded", timestamp: Date.now() }] };
+  return { messages: transcript, toolBlocks: [] };
 }
 
 export function frameFromHermesEvent(event: HermesGatewayEvent, sessionKey?: string): GatewayFrame | undefined {
@@ -275,14 +280,17 @@ function normalizeHermesMessage(value: unknown, fallbackId: string): TranscriptM
 }
 
 function chatPayload(state: "started" | "delta" | "final" | "error" | "aborted", sessionKey?: string, text?: string): GatewayFrame {
+  const payload: Record<string, unknown> = {
+    state,
+    sessionKey
+  };
+  if (state === "delta") payload.delta = text;
+  if (text && state !== "delta") {
+    payload.message = { id: `hermes:${Date.now()}`, role: state === "error" ? "error" : "assistant", text };
+  }
   return {
     type: "chat",
-    payload: {
-      state,
-      sessionKey,
-      delta: state === "delta" ? text : undefined,
-      message: text ? { id: `hermes:${Date.now()}:${crypto.randomUUID()}`, role: state === "error" ? "error" : "assistant", text } : undefined
-    }
+    payload
   };
 }
 
@@ -322,12 +330,27 @@ function toolEventFrame(sessionKey: string | undefined, phase: "start" | "update
 }
 
 function hermesSessionKey(sessionId: string): string {
-  return sessionId.startsWith(HERMES_SESSION_PREFIX) ? sessionId : `${HERMES_SESSION_PREFIX}${sessionId}`;
+  const persistedSessionId = stripHermesSessionPrefix(sessionId);
+  return `${HERMES_SESSION_PREFIX}${persistedSessionId}`;
 }
 
 function realHermesSessionId(sessionKey: string | undefined): string | undefined {
   if (!sessionKey) return undefined;
-  return sessionKey.startsWith(HERMES_SESSION_PREFIX) ? sessionKey.slice(HERMES_SESSION_PREFIX.length) : sessionKey;
+  const text = sessionKey.trim();
+  return text.startsWith(HERMES_SESSION_PREFIX) ? stripHermesSessionPrefix(text) : undefined;
+}
+
+function persistedHermesSessionId(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return stripHermesSessionPrefix(value);
+}
+
+function stripHermesSessionPrefix(value: string): string {
+  let text = value.trim();
+  while (text.startsWith(HERMES_SESSION_PREFIX)) {
+    text = text.slice(HERMES_SESSION_PREFIX.length);
+  }
+  return text;
 }
 
 function sessionIdFromResult(value: unknown): string | undefined {

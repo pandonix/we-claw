@@ -23,6 +23,10 @@ type UpgradeServer = {
   on(event: "upgrade", listener: (request: http.IncomingMessage, socket: Duplex, head: Buffer) => void): unknown;
 };
 
+export interface RuntimeBridgeHandle {
+  close(): void;
+}
+
 type RuntimeEventEmitter = (frame: GatewayFrame) => void;
 type ClaudeAgentSdkModule = typeof import("@anthropic-ai/claude-agent-sdk");
 
@@ -52,13 +56,17 @@ interface LocalClaudeSession {
   notices: ConversationNotice[];
 }
 
+const runtimeCleanups = new Set<() => void>();
+let processCleanupInstalled = false;
+
 export function runtimeBridgePath(): string {
   return RUNTIME_BRIDGE_PATH;
 }
 
-export function installRuntimeBridge(server: UpgradeServer, context: LauncherContext): void {
+export function installRuntimeBridge(server: UpgradeServer, context: LauncherContext): RuntimeBridgeHandle {
   const claudeRuntime = new ClaudeAgentSdkRuntime(context);
   const hermesRuntime = new HermesRuntime(context);
+  const cleanup = registerRuntimeCleanup(() => hermesRuntime.dispose());
   server.on("upgrade", (request, socket, head) => {
     const pathname = safePathname(request.url);
     if (pathname !== RUNTIME_BRIDGE_PATH) return;
@@ -68,10 +76,38 @@ export function installRuntimeBridge(server: UpgradeServer, context: LauncherCon
     }
     void bridgeLocalRuntimeWebSocket(request, socket, head, context, claudeRuntime, hermesRuntime);
   });
+  return {
+    close: cleanup
+  };
 }
 
 export function runtimeKind(context: LauncherContext): RuntimeKind {
   return context.config.runtimeKind;
+}
+
+function registerRuntimeCleanup(cleanup: () => void): () => void {
+  runtimeCleanups.add(cleanup);
+  if (!processCleanupInstalled) {
+    processCleanupInstalled = true;
+    process.once("exit", runRuntimeCleanups);
+    process.once("SIGINT", () => {
+      runRuntimeCleanups();
+      process.exit(130);
+    });
+    process.once("SIGTERM", () => {
+      runRuntimeCleanups();
+      process.exit(143);
+    });
+  }
+  return () => {
+    runtimeCleanups.delete(cleanup);
+    cleanup();
+  };
+}
+
+function runRuntimeCleanups(): void {
+  for (const cleanup of runtimeCleanups) cleanup();
+  runtimeCleanups.clear();
 }
 
 export function runtimeBootstrap(context: LauncherContext, gateway: RuntimeBootstrap, openclawVersion?: string): RuntimeBootstrap {
@@ -231,12 +267,10 @@ async function bridgeLocalRuntimeWebSocket(
   socket.on("close", () => {
     claudeRuntime.unsubscribeAll(emit);
     hermesRuntime.unsubscribeAll(emit);
-    if (runtimeKind(context) === "hermes") hermesRuntime.dispose();
   });
   socket.on("error", () => {
     claudeRuntime.unsubscribeAll(emit);
     hermesRuntime.unsubscribeAll(emit);
-    if (runtimeKind(context) === "hermes") hermesRuntime.dispose();
     socket.destroy();
   });
 }
@@ -284,12 +318,24 @@ async function dispatchRuntimeRequest(
 ): Promise<unknown> {
   if (method === "connect") return { methods: runtimeMethods(runtimeKind(context)), runtime: runtimeBootstrap(context, gatewayRuntimePlaceholder()) };
   if (method === "health") return { ready: true, runtime: runtimeKind(context) };
-  const activeRuntime = runtimeKind(context) === "hermes" ? hermesRuntime : claudeRuntime;
-  if (method === "sessions.subscribe") return activeRuntime.subscribeSessions(emit);
-  if (method === "sessions.messages.subscribe") return activeRuntime.subscribeSessionMessages(sessionKeyFromParams(params), emit);
-  if (method === "sessions.messages.unsubscribe") return activeRuntime.unsubscribeSessionMessages(sessionKeyFromParams(params), emit);
+  const kind = runtimeKind(context);
+  if (method === "sessions.subscribe") {
+    if (kind === "hermes") return hermesRuntime.subscribeSessions(emit);
+    if (kind === "claude-agent-sdk") return claudeRuntime.subscribeSessions(emit);
+    throw new Error(`${runtimeName(kind)} runtime bridge is not implemented.`);
+  }
+  if (method === "sessions.messages.subscribe") {
+    if (kind === "hermes") return hermesRuntime.subscribeSessionMessages(sessionKeyFromParams(params), emit);
+    if (kind === "claude-agent-sdk") return claudeRuntime.subscribeSessionMessages(sessionKeyFromParams(params), emit);
+    throw new Error(`${runtimeName(kind)} runtime bridge is not implemented.`);
+  }
+  if (method === "sessions.messages.unsubscribe") {
+    if (kind === "hermes") return hermesRuntime.unsubscribeSessionMessages(sessionKeyFromParams(params), emit);
+    if (kind === "claude-agent-sdk") return claudeRuntime.unsubscribeSessionMessages(sessionKeyFromParams(params), emit);
+    throw new Error(`${runtimeName(kind)} runtime bridge is not implemented.`);
+  }
 
-  if (runtimeKind(context) === "hermes") {
+  if (kind === "hermes") {
     if (method === "sessions.list") return { sessions: await hermesRuntime.listSessions() };
     if (method === "sessions.create") return hermesRuntime.createSession(emit);
     if (method === "chat.history") return hermesRuntime.loadHistory(sessionKeyFromParams(params));
@@ -298,8 +344,8 @@ async function dispatchRuntimeRequest(
     throw new Error(`Unsupported runtime method: ${method}`);
   }
 
-  if (runtimeKind(context) !== "claude-agent-sdk") {
-    throw new Error(`${runtimeName(runtimeKind(context))} runtime bridge is not implemented.`);
+  if (kind !== "claude-agent-sdk") {
+    throw new Error(`${runtimeName(kind)} runtime bridge is not implemented.`);
   }
 
   if (method === "sessions.list") return { sessions: await claudeRuntime.listSessions() };
