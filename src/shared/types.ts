@@ -59,6 +59,7 @@ export interface RuntimeSelection {
   };
   hermes?: {
     configured: boolean;
+    python: string;
     root?: string;
     cwd: string;
     startupTimeoutMs: number;

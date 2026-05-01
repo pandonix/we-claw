@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLauncherContext, createRuntimeSelection } from "../src/launcher/bootstrap";
@@ -58,6 +58,25 @@ describe("launcher config", () => {
     });
   });
 
+  it("uses the Hermes repo venv Python when no explicit Python is configured", () => {
+    const directory = mkdtempSync(join(tmpdir(), "we-claw-hermes-"));
+    try {
+      const python = join(directory, "venv", "bin", "python");
+      mkdirSync(join(directory, "venv", "bin"), { recursive: true });
+      writeFileSync(python, "#!/usr/bin/env python\n", "utf8");
+
+      const config = createLauncherConfig({
+        WE_CLAW_RUNTIME: "hermes",
+        WE_CLAW_HERMES_ROOT: directory
+      } as NodeJS.ProcessEnv);
+
+      expect(config.hermesPython).toBe(python);
+      expect(config.hermesCwd).toBe(directory);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("includes Hermes in runtime selection options with launcher-only config summarized", () => {
     const context = createLauncherContext({
       runtimeKind: "hermes",
@@ -78,6 +97,7 @@ describe("launcher config", () => {
     });
     expect(selection.hermes).toEqual({
       configured: true,
+      python: "python3",
       root: "/tmp/hermes",
       cwd: "/tmp/hermes-work",
       startupTimeoutMs: 9000

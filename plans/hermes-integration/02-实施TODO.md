@@ -1,6 +1,6 @@
 # 实施 TODO
 
-> 当前状态同步于 2026-04-30。状态约定：`[ ]` 未开始、`[~]` 进行中、`[x]` 已完成。
+> 当前状态同步于 2026-05-01。状态约定：`[ ]` 未开始、`[~]` 进行中、`[x]` 已完成。
 
 ## 1. Launcher 配置与 Bootstrap
 
@@ -68,7 +68,7 @@
 - [x] `test/hermes-runtime.test.ts`：覆盖 persisted session id 与 active `session_id` 映射，尤其是历史 resume 后继续 send / interrupt
 - [x] `test/normalizers.test.ts`：覆盖 Hermes delta / complete / error / status / tool event 转成现有 chat、notice、tool row 后的 reducer 行为
 - [x] `test/work-items.test.ts`：仅在新增 Hermes pending key 或迁移行为时补测，否则保持现状
-- [~] 手动验证真实 Hermes create / list / send / stream / history / interrupt 生命周期（本机 Python 环境缺少 `dotenv`，`tui_gateway.entry` 无法 import；已验证 bootstrap diagnostic）
+- [x] 手动验证真实 Hermes create / list / send / stream / history / interrupt 生命周期（已按 `next2next` 的本地 venv 思路创建 `/Users/insunny/Documents/codespace/hermes-agent/venv`；We-Claw 自动探测该 Python 后真实 adapter 与 `/api/runtime/ws` 均验收通过）
 - [x] 回归默认 OpenClaw runtime、`/api/gateway/ws`、Claude Agent SDK runtime
 
 ## 7. 建议实施顺序
@@ -76,7 +76,7 @@
 - [x] 先落 `config.ts`、`bootstrap.ts`、`types.ts` 与 launcher tests，让 Hermes 在 bootstrap / runtime picker 中可诊断但还不声称可完整运行
 - [x] 再落 Hermes stdio JSON-RPC client，使用单元测试锁住 response、event、stderr、timeout 和 dispose 行为
 - [x] 然后接入 `runtime-bridge.ts` 的方法翻译和 session id 映射，保持前端协议不变
-- [~] 最后补 app 设置展示、normalizer 回归和真实 Hermes 手动生命周期验证（真实 Hermes lifecycle 被本机缺失 `python-dotenv` 阻断）
+- [x] 最后补 app 设置展示、normalizer 回归和真实 Hermes 手动生命周期验证（设置面板展示 Hermes Python；真实 Hermes lifecycle 与 `/api/runtime/ws` stream 已通过）
 
 ## 8. 后续
 

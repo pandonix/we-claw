@@ -25,10 +25,10 @@ We-Claw 是一个运行在本机的 agent 工作台前端。它提供浏览器 U
 | --- | --- | --- | --- | --- |
 | OpenClaw | `openclaw` 或未设置 | `gateway-ws` | 默认可用 | 继续使用 OpenClaw Gateway 作为 session 和 agent lifecycle 来源。 |
 | Claude Agent SDK | `claude-agent-sdk` | `library-sdk` | 已接入首期 | 支持 list/create/history/send/abort、stream delta、tool/history 归一化；本机优先复用已登录的 Claude Code 认证态。 |
-| Hermes | `hermes` | `stdio-jsonrpc` | 未实现 | 计划通过 Hermes `tui_gateway` adapter 接入，不嵌入 Hermes Dashboard。 |
+| Hermes | `hermes` | `stdio-jsonrpc` | 首期已接入 | 通过 Hermes `tui_gateway` adapter 接入，不嵌入 Hermes Dashboard；真实 E2E 依赖 Hermes 本地 Python venv。 |
 | CLI process fallback | `cli-process` | `cli-process` | 未实现 | 仅作为 SDK 不适用时的实验性 fallback，不作为默认路径。 |
 
-`WE_CLAW_RUNTIME=auto` 当前等价于 `openclaw`。显式配置 `claude-agent-sdk` 才会切换到 Claude Agent SDK runtime。
+`WE_CLAW_RUNTIME=auto` 当前等价于 `openclaw`。显式配置 `claude-agent-sdk` 或 `hermes` 才会切换 runtime。
 
 ## 技术栈
 
@@ -51,6 +51,19 @@ We-Claw 是一个运行在本机的 agent 工作台前端。它提供浏览器 U
 如果 OpenClaw 不在 `PATH` 中，可以通过 `WE_CLAW_OPENCLAW_BIN` 指定可执行文件路径。
 
 Claude Agent SDK runtime 在本机开发中优先复用同一用户的 Claude Code 登录态，包括 `~/.claude` / `~/.claude.json` 和 macOS keychain OAuth 凭据。`ANTHROPIC_API_KEY`、云供应商认证仍可作为 SDK 支持的可选路径。
+
+Hermes runtime 需要使用 Hermes checkout 自己的 Python 环境。和 `next2next` 固定使用 `backend/.venv/bin/python` 类似，We-Claw 在未显式设置 `WE_CLAW_HERMES_PYTHON` 时会优先探测：
+
+- `$WE_CLAW_HERMES_ROOT/venv/bin/python`
+- `$WE_CLAW_HERMES_ROOT/.venv/bin/python`
+- `python3`
+
+若 Hermes checkout 尚未准备 venv，先在 Hermes 仓库中运行：
+
+```bash
+cd /Users/insunny/Documents/codespace/hermes-agent
+./setup-hermes.sh
+```
 
 ## 安装
 
@@ -96,6 +109,22 @@ WE_CLAW_CLAUDE_SDK_ALLOWED_TOOLS=Read,Glob,Grep \
 npm run start
 ```
 
+使用 Hermes runtime：
+
+```bash
+npm run build
+WE_CLAW_RUNTIME=hermes \
+WE_CLAW_HERMES_ROOT=/Users/insunny/Documents/codespace/hermes-agent \
+WE_CLAW_HERMES_CWD=/Users/insunny/Documents/codespace/hermes-agent \
+npm run start
+```
+
+如果不想使用 Hermes checkout 下的默认 `venv/bin/python`，可以显式覆盖：
+
+```bash
+WE_CLAW_HERMES_PYTHON=/path/to/hermes/venv/bin/python
+```
+
 项目还提供本地生命周期脚本：
 
 ```bash
@@ -118,6 +147,10 @@ npm run start
 | `WE_CLAW_CLAUDE_SDK_PERMISSION_MODE` | `dontAsk` | Claude Agent SDK permission mode |
 | `WE_CLAW_CLAUDE_SDK_ALLOWED_TOOLS` | empty | 逗号分隔的 Claude 工具自动允许列表，例如 `Read,Glob,Grep` |
 | `WE_CLAW_CLAUDE_SDK_MODEL` | unset | 可选 Claude 模型覆盖 |
+| `WE_CLAW_HERMES_ROOT` | unset | 本地 Hermes checkout 路径 |
+| `WE_CLAW_HERMES_CWD` | `WE_CLAW_HERMES_ROOT` 或 `process.cwd()` | Hermes 子进程工作目录 |
+| `WE_CLAW_HERMES_PYTHON` | auto | Hermes Python 解释器；未设置时优先使用 `venv/bin/python`、`.venv/bin/python`、再回退 `python3` |
+| `WE_CLAW_HERMES_STARTUP_TIMEOUT_MS` | `15000` | Hermes TUI Gateway import/startup 超时 |
 
 Gateway token 由 Node 侧解析并在本地桥接握手中注入。`/api/bootstrap` 不会把 token 返回给浏览器。
 
@@ -161,12 +194,13 @@ Runtime 集成改动还应至少覆盖：
 
 - 默认 OpenClaw：`/api/bootstrap` 返回 `runtime.kind=openclaw`，`/api/gateway/ws` 和 `/api/runtime/ws` 都能连到 Gateway。
 - Claude Agent SDK：`WE_CLAW_RUNTIME=claude-agent-sdk` 下能完成 `sessions.list`、`sessions.create`、`chat.send`、stream delta/final、`chat.history` 和 `chat.abort`。
+- Hermes：`WE_CLAW_RUNTIME=hermes` 且 `WE_CLAW_HERMES_ROOT` 指向可用 checkout 时，`/api/bootstrap` 应显示 `stdio-jsonrpc`，并通过 `/api/runtime/ws` 完成 `sessions.list`、`sessions.create`、`chat.send`、stream delta/final、`chat.history` 和 `chat.abort`。
 
 ## 设计边界
 
 - OpenClaw 是默认 agent runtime 和会话状态来源。
 - Claude Agent SDK 是显式启用的本机 runtime，首期不替代 OpenClaw 默认路径。
-- Hermes 和 CLI process fallback 需要通过独立 adapter 接入；不要把 runtime 差异散落到 UI 组件里。
+- Hermes 和 CLI process fallback 通过独立 adapter 接入；不要把 runtime 差异散落到 UI 组件里。
 - We-Claw 是本地控制面和观察面，不实现自定义 agent planner。
 - Runtime bridge 只绑定 loopback，本阶段不支持 LAN、公网或远程 runtime。
 - Node launcher 保持薄层职责，不作为通用 RPC 代理，除非认证、CORS 或传输约束需要。

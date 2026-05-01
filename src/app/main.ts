@@ -213,11 +213,11 @@ async function loadSessions(options: { loadHistoryForActive?: boolean; showRefre
 async function loadHistory(sessionId: string, options: { preserveRuntimeBlocks?: boolean } = {}): Promise<void> {
   if (!gateway) return;
   const requestSeq = ++historyRequestSeq;
-  await subscribeSessionMessages(sessionId);
   const preservedToolBlocks = options.preserveRuntimeBlocks ? state.chat.toolBlocks : undefined;
   const preservedNotices = options.preserveRuntimeBlocks ? state.chat.notices : undefined;
   state = { ...state, chat: { messages: [], toolBlocks: preservedToolBlocks, notices: preservedNotices, running: false }, statusText: "正在加载会话历史" };
   render();
+  await subscribeSessionMessages(sessionId);
   const history = await gateway.request("chat.history", { sessionKey: sessionId }).catch((error) => {
     if (requestSeq === historyRequestSeq && state.activeSessionId === sessionId) {
       state = { ...state, statusText: error instanceof Error ? error.message : "chat.history failed" };
@@ -546,6 +546,7 @@ function renderSettingsPanel(): string {
           ${renderSettingDetail("Claude 权限", selection?.claudeSdk.permissionMode ?? "未配置")}
           ${renderSettingDetail("Claude 工具", selection?.claudeSdk.allowedTools.length ? selection.claudeSdk.allowedTools.join(", ") : "未限制")}
           ${renderSettingDetail("Claude 模型", selection?.claudeSdk.model ?? "默认")}
+          ${renderSettingDetail("Hermes Python", selection?.hermes?.python ?? "未配置")}
           ${renderSettingDetail("Hermes root", selection?.hermes?.root ?? "未配置")}
           ${renderSettingDetail("Hermes cwd", selection?.hermes?.cwd ?? "未配置")}
           ${renderSettingDetail("Hermes 启动超时", selection?.hermes ? `${selection.hermes.startupTimeoutMs}ms` : "未配置")}

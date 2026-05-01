@@ -240,6 +240,30 @@ describe("work item projection", () => {
     });
   });
 
+  it("projects Hermes persisted sessions even when the local work index is missing", () => {
+    const workItems = projectWorkItems({
+      workIndex: { version: 1, items: [] },
+      sessions: [
+        session({
+          sessionKey: "hermes:20260501_101706_bda5b7",
+          sessionId: "20260501_101706_bda5b7",
+          title: "Hermes conversation",
+          subtitle: "Hermes · tui",
+          updatedAt: new Date(now).toISOString()
+        })
+      ],
+      now
+    });
+
+    expect(workItems).toHaveLength(1);
+    expect(workItems[0]).toMatchObject({
+      title: "Hermes conversation",
+      targetSessionKey: "hermes:20260501_101706_bda5b7",
+      source: "runtime",
+      kind: "run"
+    });
+  });
+
   it("promotes an explicit gateway session into stored work", () => {
     const promoted = promoteSessionToWorkItem(
       { version: 1, items: [] },

@@ -258,6 +258,7 @@ function pendingMatchScore(session: SessionSummary, entry: WorkIndexEntry): numb
 function shouldExposeGatewaySession(session: SessionSummary, activeSessionKey: string | undefined): boolean {
   if (isInternalGatewaySession(session.sessionKey)) return false;
   if (session.sessionKey === activeSessionKey) return true;
+  if (session.sessionKey.startsWith("hermes:")) return true;
   return session.status === "running" && session.title !== UNTITLED_SESSION;
 }
 

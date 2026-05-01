@@ -188,6 +188,7 @@ export function createRuntimeSelection(
     },
     hermes: {
       configured: Boolean(context.config.hermesRoot),
+      python: context.config.hermesPython,
       root: context.config.hermesRoot,
       cwd: context.config.hermesCwd,
       startupTimeoutMs: context.config.hermesStartupTimeoutMs
@@ -290,7 +291,7 @@ async function detectHermesUncached(config: LauncherConfig): Promise<HermesDetec
       available: true,
       code: "hermes.available",
       message: "Hermes TUI Gateway entry is available.",
-      detail: `Hermes root: ${hermesRoot}`
+      detail: `Hermes root: ${hermesRoot}; Python: ${config.hermesPython}`
     };
   } catch (error) {
     const message = error instanceof Error ? redact(error.message) : redact(String(error));
@@ -298,7 +299,7 @@ async function detectHermesUncached(config: LauncherConfig): Promise<HermesDetec
       available: false,
       code: "hermes.entry-unavailable",
       message: "Hermes TUI Gateway entry could not be imported.",
-      error: message
+      error: `${message}\nPython: ${config.hermesPython}`
     };
   }
 }
@@ -316,7 +317,7 @@ function hermesStatusFromConfig(config: LauncherConfig): HermesDetection {
     available: true,
     code: "hermes.configured",
     message: "Hermes runtime is configured.",
-    detail: `Hermes root: ${config.hermesRoot}`
+    detail: `Hermes root: ${config.hermesRoot}; Python: ${config.hermesPython}`
   };
 }
 

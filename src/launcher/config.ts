@@ -46,8 +46,8 @@ export function createLauncherConfig(env: NodeJS.ProcessEnv = process.env, setti
     claudeSdkPermissionMode: normalizePermissionMode(env.WE_CLAW_CLAUDE_SDK_PERMISSION_MODE),
     claudeSdkAllowedTools: parseList(env.WE_CLAW_CLAUDE_SDK_ALLOWED_TOOLS),
     claudeSdkModel: normalizeOptionalText(env.WE_CLAW_CLAUDE_SDK_MODEL),
-    hermesPython: normalizeOptionalText(env.WE_CLAW_HERMES_PYTHON) ?? "python3",
     hermesRoot: normalizeOptionalText(env.WE_CLAW_HERMES_ROOT),
+    hermesPython: resolveHermesPython(env),
     hermesCwd: normalizeOptionalText(env.WE_CLAW_HERMES_CWD) ?? normalizeOptionalText(env.WE_CLAW_HERMES_ROOT) ?? process.cwd(),
     hermesStartupTimeoutMs: normalizePositiveInteger(env.WE_CLAW_HERMES_STARTUP_TIMEOUT_MS, DEFAULT_HERMES_STARTUP_TIMEOUT_MS)
   };
@@ -99,6 +99,22 @@ function parseList(value: string | undefined): string[] {
 function normalizeOptionalText(value: string | undefined): string | undefined {
   const text = value?.trim();
   return text || undefined;
+}
+
+function resolveHermesPython(env: NodeJS.ProcessEnv): string {
+  const explicitPython = normalizeOptionalText(env.WE_CLAW_HERMES_PYTHON);
+  if (explicitPython) return explicitPython;
+
+  const hermesRoot = normalizeOptionalText(env.WE_CLAW_HERMES_ROOT);
+  if (!hermesRoot) return "python3";
+
+  const venvPython = join(hermesRoot, "venv", "bin", "python");
+  if (existsSync(venvPython)) return venvPython;
+
+  const dotVenvPython = join(hermesRoot, ".venv", "bin", "python");
+  if (existsSync(dotVenvPython)) return dotVenvPython;
+
+  return "python3";
 }
 
 function normalizePositiveInteger(value: string | undefined, fallback: number): number {
